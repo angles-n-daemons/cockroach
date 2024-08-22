@@ -122,6 +122,7 @@ go_library(
         "explain_vec.go",
         "export.go",
         "filter.go",
+        "fingerprint_cardinality_counter.go",
         "fingerprint_span.go",
         "function_references.go",
         "generate_objects.go",

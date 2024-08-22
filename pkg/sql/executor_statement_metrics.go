@@ -61,6 +61,10 @@ type EngineMetrics struct {
 // EngineMetrics implements the metric.Struct interface.
 var _ metric.Struct = EngineMetrics{}
 
+var cardinalityCounter = NewFingerprintCardinalityCounter(60 * 5)
+
+const CONCERNING_LITERALS_THRESHOLD = 100
+
 // MetricStruct is part of the metric.Struct interface.
 func (EngineMetrics) MetricStruct() {}
 
@@ -215,6 +219,7 @@ func (ex *connExecutor) recordStatementSummary(
 		ExecStats:            queryLevelStats,
 		Indexes:              planner.instrumentation.indexesUsed,
 		Database:             planner.SessionData().Database,
+		InjectionVuln:        false,
 	}
 
 	stmtFingerprintID, err :=
@@ -256,6 +261,26 @@ func (ex *connExecutor) recordStatementSummary(
 			if log.V(2 /* level */) {
 				log.Warningf(ctx, "unable to record statement exec stats: %s", err)
 			}
+		}
+	}
+
+	literals := []string{}
+	_, err = tree.SimpleStmtVisit(stmt.AST, func(expr tree.Expr) (bool, tree.Expr, error) {
+		if str, ok := expr.(*tree.StrVal); ok {
+			literals = append(literals, str.RawString())
+		}
+		return true, expr, nil
+	})
+	if err != nil {
+		if log.V(2 /* level */) {
+			log.Warningf(ctx, "occured error walking the ast: %s", err)
+		}
+	}
+	for i, literal := range literals {
+		count := cardinalityCounter.Add(stmtFingerprintID, i, literal)
+		if count > CONCERNING_LITERALS_THRESHOLD {
+			recordedStmtStats.InjectionVuln = true
+			break
 		}
 	}
 
