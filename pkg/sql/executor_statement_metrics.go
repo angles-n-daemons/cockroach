@@ -12,6 +12,8 @@ package sql
 
 import (
 	"context"
+	"fmt"
+	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/appstatspb"
 	"github.com/cockroachdb/cockroach/pkg/sql/contentionpb"
@@ -236,6 +238,30 @@ func (ex *connExecutor) recordStatementSummary(
 		ex.server.ServerMetrics.StatsMetrics.DiscardedStatsCount.Inc(1)
 	}
 
+	literals := []string{}
+	isSystemQuery := strings.Contains(stmt.SQL, "system") && strings.Contains(stmt.SQL, "crdb_internal")
+	_, err = tree.SimpleStmtVisit(stmt.AST, func(expr tree.Expr) (bool, tree.Expr, error) {
+		if str, ok := expr.(*tree.StrVal); ok {
+			literals = append(literals, str.RawString())
+		}
+		return true, expr, nil
+	})
+	if err != nil {
+		if log.V(2 /* level */) {
+			log.Warningf(ctx, "error occured while scanning the query for string literals: %s", err)
+		}
+	}
+	if !isSystemQuery {
+		for i, literal := range literals {
+			count := cardinalityCounter.Add(stmtFingerprintID, i, literal)
+			if count > CONCERNING_LITERALS_THRESHOLD {
+				fmt.Println("whoop, dangerous query", stmt.SQL)
+				recordedStmtStats.InjectionVuln = true
+				break
+			}
+		}
+	}
+
 	// Record statement execution statistics if span is recorded and no error was
 	// encountered while collecting query-level statistics.
 	if queryLevelStatsOk {
@@ -261,26 +287,6 @@ func (ex *connExecutor) recordStatementSummary(
 			if log.V(2 /* level */) {
 				log.Warningf(ctx, "unable to record statement exec stats: %s", err)
 			}
-		}
-	}
-
-	literals := []string{}
-	_, err = tree.SimpleStmtVisit(stmt.AST, func(expr tree.Expr) (bool, tree.Expr, error) {
-		if str, ok := expr.(*tree.StrVal); ok {
-			literals = append(literals, str.RawString())
-		}
-		return true, expr, nil
-	})
-	if err != nil {
-		if log.V(2 /* level */) {
-			log.Warningf(ctx, "occured error walking the ast: %s", err)
-		}
-	}
-	for i, literal := range literals {
-		count := cardinalityCounter.Add(stmtFingerprintID, i, literal)
-		if count > CONCERNING_LITERALS_THRESHOLD {
-			recordedStmtStats.InjectionVuln = true
-			break
 		}
 	}
 
