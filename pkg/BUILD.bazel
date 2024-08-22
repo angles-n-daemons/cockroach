@@ -2675,6 +2675,7 @@ GO_TARGETS = [
     "//pkg/workload/rand:rand_test",
     "//pkg/workload/schemachange:schemachange",
     "//pkg/workload/schemachange:schemachange_test",
+    "//pkg/workload/sqli:sqli",
     "//pkg/workload/sqlsmith:sqlsmith",
     "//pkg/workload/sqlstats:sqlstats",
     "//pkg/workload/sqlstats:sqlstats_test",
