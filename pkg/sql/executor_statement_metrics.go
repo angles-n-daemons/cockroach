@@ -12,7 +12,6 @@ package sql
 
 import (
 	"context"
-	"fmt"
 	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/appstatspb"
@@ -238,6 +237,15 @@ func (ex *connExecutor) recordStatementSummary(
 		ex.server.ServerMetrics.StatsMetrics.DiscardedStatsCount.Inc(1)
 	}
 
+	// SQL Injection Scanning
+	// The below blocks of code are responsible for identifying sql injection
+	// entrypoints into the system. This is done in two phases:
+	//  1. In the first phase, the statement tree is walked and all string literals
+	//     are pulled out for examination.
+	//  2. In the second phase, the fingerprint associated with the statement
+	//     has its cardinality counts updated using the literals. If the count has
+	//     gone over a certain threshold, the 'InjectionVuln' property on the
+	//     recordedStmtStats is set to true for handling in ObserveStatment
 	literals := []string{}
 	isSystemQuery := strings.Contains(stmt.SQL, "system") && strings.Contains(stmt.SQL, "crdb_internal")
 	_, err = tree.SimpleStmtVisit(stmt.AST, func(expr tree.Expr) (bool, tree.Expr, error) {
@@ -255,7 +263,6 @@ func (ex *connExecutor) recordStatementSummary(
 		for i, literal := range literals {
 			count := cardinalityCounter.Add(stmtFingerprintID, i, literal)
 			if count > CONCERNING_LITERALS_THRESHOLD {
-				fmt.Println("whoop, dangerous query", stmt.SQL)
 				recordedStmtStats.InjectionVuln = true
 				break
 			}

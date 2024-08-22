@@ -32,6 +32,27 @@ type FingerprintCardinalityCounter struct {
 	mu         sync.Mutex
 }
 
+/*
+ * The FingerprintCardinalityCounter is a process singleton responsible for
+ * keeping track of the cardinality of string literals within various sql
+ * fingerprints. It maintains an internal lookup map to do so.
+ * The map is keyed by the sql fingerprint, the value of the map is an array of
+ * linked lists. Each element in the array corresponds to the ith position string
+ * within the fingerprint's query.
+ * The elements of the linked list are the string literal values used to query.
+ * example:
+ *   - Fingerprint 1: SELECT _, _;
+ *   - With queries: "SELECT 'hello', 'world'", "SELECT 'hello', 'moon'"
+ *   Lookup = {
+ *     [1]: [
+ *       ['hello'], -- only hello appears for the first position
+ *       ['world', 'moon'],
+ *     ]
+ *   }
+ *
+ * Note: so the linked lists do not grow indefinitely, the list is both pruned
+ * by ttl and by max length.
+ */
 func (c *FingerprintCardinalityCounter) Add(
 	fingerprintId appstatspb.StmtFingerprintID, position int, literal string,
 ) int {
