@@ -41,10 +41,10 @@ type FingerprintCardinalityCounter struct {
  * within the fingerprint's query.
  * The elements of the linked list are the string literal values used to query.
  * example:
- *   - Fingerprint 1: SELECT _, _;
+ *   - Fingerprint 991: SELECT _, _;
  *   - With queries: "SELECT 'hello', 'world'", "SELECT 'hello', 'moon'"
  *   Lookup = {
- *     [1]: [
+ *     [991]: [
  *       ['hello'], -- only hello appears for the first position
  *       ['world', 'moon'],
  *     ]
