@@ -27,6 +27,7 @@ export enum InsightNameEnum {
   PLAN_REGRESSION = "PlanRegression",
   SUBOPTIMAL_PLAN = "SuboptimalPlan",
   SLOW_EXECUTION = "SlowExecution",
+  INJECTION_VULN = "InjectionVulnerability",
 }
 
 export enum InsightExecEnum {
@@ -261,6 +262,16 @@ export const failedExecutionInsight = (execType: InsightExecEnum): Insight => {
   };
 };
 
+export const injectionVulnerabilityInsight = (execType: InsightExecEnum): Insight => {
+  const description = "Possible SQL Injection entrypoint, high cardinality string literals associated with this fingerprint.";
+  return {
+    name: InsightNameEnum.INJECTION_VULN,
+    label: InsightEnumToLabel.get(InsightNameEnum.INJECTION_VULN),
+    description: description,
+    tooltipDescription: description,
+  }
+}
+
 export const getInsightFromCause = (
   cause: string,
   execOption: InsightExecEnum,
@@ -282,6 +293,8 @@ export const getInsightFromCause = (
       return suboptimalPlanInsight(execOption);
     case InsightNameEnum.HIGH_RETRY_COUNT:
       return highRetryCountInsight(execOption);
+    case InsightNameEnum.INJECTION_VULN:
+      return injectionVulnerabilityInsight(execOption);
     default:
       return slowExecutionInsight(execOption, latencyThreshold);
   }
@@ -298,6 +311,7 @@ export const InsightEnumToLabel = new Map<string, string>([
   [InsightNameEnum.SUBOPTIMAL_PLAN.toString(), "Suboptimal Plan"],
   [InsightNameEnum.HIGH_RETRY_COUNT.toString(), "High Retry Count"],
   [InsightNameEnum.FAILED_EXECUTION.toString(), "Failed Execution"],
+  [InsightNameEnum.INJECTION_VULN.toString(), "Injection Vulnerability"],
 ]);
 
 export type WorkloadInsightEventFilters = Pick<

@@ -278,6 +278,7 @@ export function getInsightsFromProblemsAndCauses(
   problems: string[],
   causes: string[] | null,
   execType: InsightExecEnum,
+  injectionVuln: boolean,
 ): Insight[] {
   // TODO(ericharmeling,todd): Replace these strings when using the insights protos.
   const insights: Insight[] = [];
@@ -305,6 +306,10 @@ export function getInsightsFromProblemsAndCauses(
       default:
     }
   });
+
+  if (injectionVuln) {
+    insights.push(getInsightFromCause(InsightNameEnum.INJECTION_VULN, execType));
+  }
 
   return insights;
 }

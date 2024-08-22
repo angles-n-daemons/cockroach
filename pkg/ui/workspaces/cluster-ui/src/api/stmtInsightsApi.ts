@@ -71,6 +71,7 @@ export type StmtInsightsResponseRow = {
   error_code: string;
   last_error_redactable: string;
   status: StatementStatus;
+  injection_vuln: boolean;
 };
 
 const stmtColumns = `
@@ -102,7 +103,8 @@ plan_gist,
 cpu_sql_nanos,
 error_code,
 last_error_redactable,
-status
+status,
+injection_vuln
 `;
 
 const stmtInsightsOverviewQuery = (req?: StmtInsightsReq): string => {
@@ -112,7 +114,7 @@ const stmtInsightsOverviewQuery = (req?: StmtInsightsReq): string => {
 
   let whereClause = `
   WHERE app_name NOT LIKE '${INTERNAL_APP_NAME_PREFIX}%'
-  AND problem != 'None'
+  AND (problem != 'None' OR injection_vuln)
   AND txn_id != '00000000-0000-0000-0000-000000000000'`;
   if (req?.start) {
     whereClause =
@@ -240,12 +242,14 @@ export function formatStmtInsights(
         [row.problem],
         row.causes,
         InsightExecEnum.STATEMENT,
+        row.injection_vuln,
       ),
       planGist: row.plan_gist,
       cpuSQLNanos: row.cpu_sql_nanos,
       errorCode: row.error_code,
       errorMsg: row.last_error_redactable,
       status: row.status,
+      injectionVuln: row.injection_vuln,
     } as StmtInsightEvent;
   });
 }

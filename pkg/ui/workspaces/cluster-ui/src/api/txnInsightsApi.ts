@@ -161,6 +161,7 @@ export function formatTxnInsightsRow(
     row.problems,
     row.causes,
     InsightExecEnum.TRANSACTION,
+    false,
   );
   return {
     sessionID: row.session_id,
