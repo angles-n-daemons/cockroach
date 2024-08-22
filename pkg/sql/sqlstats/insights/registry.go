@@ -112,7 +112,9 @@ func (r *lockingRegistry) ObserveTransaction(sessionID clusterunique.ID, transac
 
 	// Mark statements which are detected as slow or have a failed status.
 	var slowOrFailedStatements intsets.Fast
+	var injectionVuln bool
 	for i, s := range *statements {
+		injectionVuln = injectionVuln || s.InjectionVuln
 		if !shouldIgnoreStatement(s) && (r.detector.isSlow(s) || isFailed(s)) {
 			slowOrFailedStatements.Add(i)
 		}
@@ -127,7 +129,7 @@ func (r *lockingRegistry) ObserveTransaction(sessionID clusterunique.ID, transac
 	}
 
 	txnFailed := transaction.Status == Transaction_Failed
-	if slowOrFailedStatements.Empty() && !highContention && !txnFailed {
+	if slowOrFailedStatements.Empty() && !highContention && !txnFailed && !injectionVuln {
 		// We only record an insight if we have slow statements, high txn contention, or failed executions.
 		return
 	}

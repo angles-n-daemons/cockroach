@@ -278,6 +278,7 @@ func (s *StatsCollector) ObserveStatement(
 		CPUSQLNanos:          cpuSQLNanos,
 		ErrorCode:            errorCode,
 		ErrorMsg:             errorMsg,
+		InjectionVuln:        value.InjectionVuln,
 	}
 	if s.insightsWriter != nil {
 		s.insightsWriter.ObserveStatement(value.SessionID, &insight)

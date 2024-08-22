@@ -54,9 +54,12 @@ enum Cause {
 }
 
 message Session {
-  bytes id = 1 [(gogoproto.customname) = "ID",
-    (gogoproto.customtype) = "github.com/cockroachdb/cockroach/pkg/sql/clusterunique.ID",
-    (gogoproto.nullable) = false];
+  bytes id = 1 [
+    (gogoproto.customname) = "ID",
+    (gogoproto.customtype) =
+        "github.com/cockroachdb/cockroach/pkg/sql/clusterunique.ID",
+    (gogoproto.nullable) = false
+  ];
 }
 
 message Transaction {
@@ -66,18 +69,25 @@ message Transaction {
     Failed = 1;
   }
 
-  bytes id = 1 [(gogoproto.customname) = "ID",
-    (gogoproto.customtype) = "github.com/cockroachdb/cockroach/pkg/util/uuid.UUID",
-    (gogoproto.nullable) = false];
-  uint64 fingerprint_id = 2
-  [(gogoproto.customname) = "FingerprintID",
-    (gogoproto.customtype) = "github.com/cockroachdb/cockroach/pkg/sql/appstatspb.TransactionFingerprintID",
-    (gogoproto.nullable) = false];
+  bytes id = 1 [
+    (gogoproto.customname) = "ID",
+    (gogoproto.customtype) =
+        "github.com/cockroachdb/cockroach/pkg/util/uuid.UUID",
+    (gogoproto.nullable) = false
+  ];
+  uint64 fingerprint_id = 2 [
+    (gogoproto.customname) = "FingerprintID",
+    (gogoproto.customtype) = "github.com/cockroachdb/cockroach/pkg/sql/"
+                             "appstatspb.TransactionFingerprintID",
+    (gogoproto.nullable) = false
+  ];
   string user_priority = 3;
   bool implicit_txn = 4;
-  google.protobuf.Duration contention = 5 [(gogoproto.stdduration) = true];
-  google.protobuf.Timestamp start_time = 6 [(gogoproto.nullable) = false, (gogoproto.stdtime) = true];
-  google.protobuf.Timestamp end_time = 7 [(gogoproto.nullable) = false, (gogoproto.stdtime) = true];
+  google.protobuf.Duration contention = 5 [ (gogoproto.stdduration) = true ];
+  google.protobuf.Timestamp start_time = 6
+      [ (gogoproto.nullable) = false, (gogoproto.stdtime) = true ];
+  google.protobuf.Timestamp end_time = 7
+      [ (gogoproto.nullable) = false, (gogoproto.stdtime) = true ];
   string user = 8;
   string application_name = 9;
   int64 rows_read = 10;
@@ -86,13 +96,19 @@ message Transaction {
   string auto_retry_reason = 13;
   repeated Problem problems = 14;
   repeated Cause causes = 15;
-  repeated bytes stmt_execution_ids = 16 [ (gogoproto.customname) = "StmtExecutionIDs",
-    (gogoproto.customtype) = "github.com/cockroachdb/cockroach/pkg/sql/clusterunique.ID"];
-  int64 cpu_sql_nanos = 17 [(gogoproto.customname) = "CPUSQLNanos"];
+  repeated bytes stmt_execution_ids = 16 [
+    (gogoproto.customname) = "StmtExecutionIDs",
+    (gogoproto.customtype) =
+        "github.com/cockroachdb/cockroach/pkg/sql/clusterunique.ID"
+  ];
+  int64 cpu_sql_nanos = 17 [ (gogoproto.customname) = "CPUSQLNanos" ];
   // The error code of the last failed statement in the transaction.
-  string last_error_code = 18; 
+  string last_error_code = 18;
   // The error message of the last failed statement in the transaction.
-  string last_error_msg = 20 [(gogoproto.nullable) = false, (gogoproto.customtype) = "github.com/cockroachdb/redact.RedactableString"];
+  string last_error_msg = 20 [
+    (gogoproto.nullable) = false,
+    (gogoproto.customtype) = "github.com/cockroachdb/redact.RedactableString"
+  ];
   Status status = 19;
 
   // Next ID: 21.
@@ -104,18 +120,26 @@ message Statement {
     Failed = 1;
   }
 
-  bytes id = 1 [(gogoproto.customname) = "ID",
-    (gogoproto.customtype) = "github.com/cockroachdb/cockroach/pkg/sql/clusterunique.ID",
-    (gogoproto.nullable) = false];
-  uint64 fingerprint_id = 2 [(gogoproto.customname) = "FingerprintID",
-    (gogoproto.casttype) = "github.com/cockroachdb/cockroach/pkg/sql/appstatspb.StmtFingerprintID"];
+  bytes id = 1 [
+    (gogoproto.customname) = "ID",
+    (gogoproto.customtype) =
+        "github.com/cockroachdb/cockroach/pkg/sql/clusterunique.ID",
+    (gogoproto.nullable) = false
+  ];
+  uint64 fingerprint_id = 2 [
+    (gogoproto.customname) = "FingerprintID",
+    (gogoproto.casttype) =
+        "github.com/cockroachdb/cockroach/pkg/sql/appstatspb.StmtFingerprintID"
+  ];
   double latency_in_seconds = 3;
   string query = 4;
   Status status = 5;
-  google.protobuf.Timestamp start_time = 6 [(gogoproto.nullable) = false, (gogoproto.stdtime) = true];
-  google.protobuf.Timestamp end_time = 7 [(gogoproto.nullable) = false, (gogoproto.stdtime) = true];
+  google.protobuf.Timestamp start_time = 6
+      [ (gogoproto.nullable) = false, (gogoproto.stdtime) = true ];
+  google.protobuf.Timestamp end_time = 7
+      [ (gogoproto.nullable) = false, (gogoproto.stdtime) = true ];
   bool full_scan = 8;
-  reserved 9; // previously user
+  reserved 9;  // previously user
   reserved 10; // previously application_name
   string database = 11;
   string plan_gist = 12;
@@ -125,24 +149,27 @@ message Statement {
   string auto_retry_reason = 16;
   // Nodes is the ordered list of nodes ids on which the statement was executed.
   repeated int64 nodes = 17;
-  google.protobuf.Duration contention = 18 [(gogoproto.stdduration) = true];
+  google.protobuf.Duration contention = 18 [ (gogoproto.stdduration) = true ];
   repeated string index_recommendations = 19;
   reserved 20; // previously contention_events
   Problem problem = 21;
   repeated Cause causes = 22;
-  int64 cpu_sql_nanos = 23 [(gogoproto.customname) = "CPUSQLNanos"];
+  int64 cpu_sql_nanos = 23 [ (gogoproto.customname) = "CPUSQLNanos" ];
   // The most recent error code experienced by this statement.
   string error_code = 24;
   // The most recent error experienced by this statement.
-  string error_msg = 25 [(gogoproto.nullable) = false, (gogoproto.customtype) = "github.com/cockroachdb/redact.RedactableString"];
+  string error_msg = 25 [
+    (gogoproto.nullable) = false,
+    (gogoproto.customtype) = "github.com/cockroachdb/redact.RedactableString"
+  ];
   // KVNodeIDs is the ordered list of KV node ids which were used to evaluate KV
   // read requests.
-  repeated int32 kv_node_ids = 26 [(gogoproto.customname) = "KVNodeIDs"];
+  repeated int32 kv_node_ids = 26 [ (gogoproto.customname) = "KVNodeIDs" ];
+  bool injection_vuln = 27;
 }
 
-
 message Insight {
-  Session session = 1 [(gogoproto.nullable) = false];
+  Session session = 1 [ (gogoproto.nullable) = false ];
   Transaction transaction = 2;
   repeated Statement statements = 6;
 
@@ -153,6 +180,6 @@ message Insight {
   // TODO: Move these fields to 'reserved' at 23.2.
   Statement statement = 3;
 
-  reserved  4; // Previously problem.
+  reserved 4; // Previously problem.
   reserved 5; // Previously causes.
 }
