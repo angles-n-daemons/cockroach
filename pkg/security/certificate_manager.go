@@ -20,7 +20,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/log/eventpb"
 	"github.com/cockroachdb/cockroach/pkg/util/log/severity"
-	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/sysutil"
@@ -102,7 +101,6 @@ func makeCertificateManager(
 		Locator:          certnames.MakeLocator(certsDir),
 		tenantIdentifier: o.tenantIdentifier,
 		tlsSettings:      tlsSettings,
-		certMetrics:      makeMetrics(),
 	}
 }
 
@@ -397,46 +395,8 @@ func (cm *CertificateManager) LoadCertificates() error {
 	cm.tenantCert = tenantCert
 	cm.tenantSigningCert = tenantSigningCert
 
-	cm.updateMetricsLocked()
+	cm.certMetrics = makeMetricsLocked(cm)
 	return nil
-}
-
-// updateMetricsLocked updates the values on the certificate metrics.
-// The metrics may not exist (eg: in tests that build their own CertificateManager).
-// If the corresponding certificate is missing or invalid (Error != nil), we reset the
-// metric to zero.
-// cm.mu must be held to protect the certificates. Metrics do their own atomicity.
-func (cm *CertificateManager) updateMetricsLocked() {
-	maybeSetMetric := func(m *metric.Gauge, ci *CertInfo) {
-		if m == nil {
-			return
-		}
-		if ci != nil && ci.Error == nil {
-			m.Update(ci.ExpirationTime.Unix())
-		} else {
-			m.Update(0)
-		}
-	}
-
-	// CA certificate expiration.
-	maybeSetMetric(cm.certMetrics.CAExpiration, cm.caCert)
-
-	// Client CA certificate expiration.
-	maybeSetMetric(cm.certMetrics.ClientCAExpiration, cm.clientCACert)
-
-	// UI CA certificate expiration.
-	maybeSetMetric(cm.certMetrics.UICAExpiration, cm.uiCACert)
-
-	// Node certificate expiration.
-	// TODO(marc): we need to examine the entire certificate chain here, if the CA cert
-	// used to sign the node cert expires sooner, then that is the expiration time to report.
-	maybeSetMetric(cm.certMetrics.NodeExpiration, cm.nodeCert)
-
-	// Node client certificate expiration.
-	maybeSetMetric(cm.certMetrics.NodeClientExpiration, cm.nodeClientCert)
-
-	// UI certificate expiration.
-	maybeSetMetric(cm.certMetrics.UIExpiration, cm.uiCert)
 }
 
 // GetServerTLSConfig returns a server TLS config with a callback to fetch the

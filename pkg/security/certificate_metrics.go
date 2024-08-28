@@ -13,6 +13,7 @@ package security
 import (
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/metric/aggmetric"
+	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 )
 
 const SQLUserLabel = "sql_user"
@@ -36,6 +37,11 @@ type Metrics struct {
 	// The top-level aggregated value for this metric is not meaningful
 	// (it sums up all the minimum expirations of all users).
 	ClientExpiration *aggmetric.AggGauge
+
+	// Below are TTL metrics which mirror the above expiration metrics.
+	// Instead of returning the unix time in seconds however, they
+	// return the number of seconds till expiration.
+	CATTL *metric.Gauge
 }
 
 var _ metric.Struct = (*Metrics)(nil)
@@ -100,20 +106,54 @@ var (
 		Measurement: "Certificate Expiration",
 		Unit:        metric.Unit_TIMESTAMP_SEC,
 	}
+
+	metaCATTL = metric.Metadata{
+		Name:        "security.certificate.ttl.ca",
+		Help:        "Seconds till expiration for the CA certificate. 0 means expired, no certificate or error.",
+		Measurement: "Certificate TTL",
+		Unit:        metric.Unit_TIMESTAMP_SEC,
+	}
 )
 
-func makeMetrics() Metrics {
+// closures are a poor man's object
+func expirationGauge(metadata metric.Metadata, ci *CertInfo) *metric.Gauge {
+	return metric.NewFunctionalGauge(metadata, func() int64 {
+		if ci != nil && ci.Error == nil {
+			return ci.ExpirationTime.Unix()
+		} else {
+			return 0
+		}
+	})
+}
+func ttlGauge(metadata metric.Metadata, ci *CertInfo) *metric.Gauge {
+	return metric.NewFunctionalGauge(metadata, func() int64 {
+		if ci != nil && ci.Error == nil {
+			expiry := ci.ExpirationTime.Unix()
+			sec := timeutil.Unix(expiry, 0).Sub(timeutil.Now()).Seconds()
+			return int64(sec)
+		} else {
+			return 0
+		}
+	})
+}
+
+// makeMetricsLocked creates the metrics using the certificate values.
+// If the corresponding certificate is missing or invalid (Error != nil), we reset the
+// metric to zero.
+// cm.mu must be held to protect the certificates. Metrics do their own atomicity.
+func makeMetricsLocked(cm *CertificateManager) Metrics {
 	b := aggmetric.MakeBuilder(SQLUserLabel)
-	m := Metrics{
-		CAExpiration:         metric.NewGauge(metaCAExpiration),
-		ClientCAExpiration:   metric.NewGauge(metaClientCAExpiration),
-		TenantCAExpiration:   metric.NewGauge(metaTenantCAExpiration),
-		UICAExpiration:       metric.NewGauge(metaUICAExpiration),
-		ClientExpiration:     b.Gauge(metaClientExpiration),
+	return Metrics{
+		CAExpiration:         expirationGauge(metaCAExpiration, cm.caCert),
 		TenantExpiration:     metric.NewGauge(metaTenantExpiration),
-		NodeExpiration:       metric.NewGauge(metaNodeExpiration),
-		NodeClientExpiration: metric.NewGauge(metaNodeClientExpiration),
-		UIExpiration:         metric.NewGauge(metaUIExpiration),
+		TenantCAExpiration:   metric.NewGauge(metaTenantCAExpiration),
+		UIExpiration:         expirationGauge(metaUIExpiration, cm.uiCert),
+		UICAExpiration:       expirationGauge(metaUICAExpiration, cm.uiCACert),
+		ClientExpiration:     b.Gauge(metaClientExpiration),
+		ClientCAExpiration:   expirationGauge(metaClientCAExpiration, cm.clientCACert),
+		NodeExpiration:       expirationGauge(metaNodeExpiration, cm.nodeCert),
+		NodeClientExpiration: expirationGauge(metaNodeClientExpiration, cm.nodeClientCert),
+
+		CATTL: ttlGauge(metaCATTL, cm.caCert),
 	}
-	return m
 }
