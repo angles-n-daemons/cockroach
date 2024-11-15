@@ -239,6 +239,7 @@ go_library(
         "//pkg/workload/ttlbench",
         "//pkg/workload/ttllogger",
         "//pkg/workload/workloadsql",
+        "//pkg/workload/hotspots",
         "//pkg/workload/ycsb",
         "@com_github_cockroachdb_apd_v3//:apd",
         "@com_github_cockroachdb_errors//:errors",

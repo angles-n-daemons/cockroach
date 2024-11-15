@@ -7,6 +7,8 @@ package cli
 
 import (
 	"fmt"
+	"reflect"
+	"runtime"
 
 	"github.com/cockroachdb/cockroach/pkg/build"
 	"github.com/cockroachdb/cockroach/pkg/cli/exit"
@@ -14,6 +16,10 @@ import (
 	"github.com/cockroachdb/errors"
 	"github.com/spf13/cobra"
 )
+
+func GetFunctionName(i interface{}) string {
+	return runtime.FuncForPC(reflect.ValueOf(i).Pointer()).Name()
+}
 
 // WorkloadCmd returns a new command that can serve as the root of the workload
 // command tree.
@@ -43,6 +49,7 @@ func WorkloadCmd(userFacing bool) *cobra.Command {
 			`run`:      {},
 		}
 		for _, m := range workload.Registered() {
+			fmt.Println(m.Name)
 			allowlist[m.Name] = struct{}{}
 		}
 		var hideNonPublic func(c *cobra.Command)
