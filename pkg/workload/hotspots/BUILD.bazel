@@ -2,7 +2,7 @@ load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "hotspots",
-    srcs = ["index_serial.go", "util.go"],
+    srcs = ["index_serial.go", "unrestricted_uuid.go", "util.go"],
     importpath = "github.com/cockroachdb/cockroach/pkg/workload/hotspots",
     visibility = ["//visibility:public"],
     deps = [

@@ -18,9 +18,7 @@ import (
 	"github.com/spf13/pflag"
 )
 
-var RandomSeed = workload.NewInt64RandomSeed()
-
-type indexSerial struct {
+type unrestrictedUUID struct {
 	flags     workload.Flags
 	connFlags *workload.ConnFlags
 
@@ -32,16 +30,16 @@ type indexSerial struct {
 }
 
 func init() {
-	workload.Register(indexesMeta)
+	workload.Register(unrestrictedUUIDMeta)
 }
 
-var indexesMeta = workload.Meta{
-	Name:        `hotspots__index_serial`,
-	Description: `Simulate an index hotspot by inserting into a table with a serial primary key.`,
+var unrestrictedUUIDMeta = workload.Meta{
+	Name:        `hotspots__unrestricted_uuid`,
+	Description: `Simulate workload similar to hotspot workloads for comparison`,
 	Version:     `1.0.0`,
 	RandomSeed:  RandomSeed,
 	New: func() workload.Generator {
-		g := &indexSerial{}
+		g := &unrestrictedUUID{}
 		g.flags.FlagSet = pflag.NewFlagSet(`hotspots`, pflag.ContinueOnError)
 		RandomSeed.AddFlag(&g.flags)
 		g.connFlags = workload.NewConnFlags(&g.flags)
@@ -49,21 +47,21 @@ var indexesMeta = workload.Meta{
 	},
 }
 
-var _ workload.Generator = &indexSerial{}
-var _ workload.Opser = &indexSerial{}
-var _ workload.Hookser = &indexSerial{}
+var _ workload.Generator = &unrestrictedUUID{}
+var _ workload.Opser = &unrestrictedUUID{}
+var _ workload.Hookser = &unrestrictedUUID{}
 
 // Meta implements the Generator interface.
-func (*indexSerial) Meta() workload.Meta { return indexesMeta }
+func (*unrestrictedUUID) Meta() workload.Meta { return unrestrictedUUIDMeta }
 
 // Flags implements the Flagser interface.
-func (w *indexSerial) Flags() workload.Flags { return w.flags }
+func (w *unrestrictedUUID) Flags() workload.Flags { return w.flags }
 
 // ConnFlags implements the ConnFlagser interface.
-func (w *indexSerial) ConnFlags() *workload.ConnFlags { return w.connFlags }
+func (w *unrestrictedUUID) ConnFlags() *workload.ConnFlags { return w.connFlags }
 
 // Hooks implements the Hookser interface.
-func (w *indexSerial) Hooks() workload.Hooks {
+func (w *unrestrictedUUID) Hooks() workload.Hooks {
 	return workload.Hooks{
 		Validate: func() error {
 			return nil
@@ -72,16 +70,15 @@ func (w *indexSerial) Hooks() workload.Hooks {
 }
 
 // Tables implements the Generator interface.
-func (w *indexSerial) Tables() []workload.Table {
-
+func (w *unrestrictedUUID) Tables() []workload.Table {
 	return []workload.Table{{
 		Name:   `users`,
-		Schema: `(id SERIAL PRIMARY KEY, email VARCHAR)`,
+		Schema: `(id UUID PRIMARY KEY DEFAULT GEN_RANDOM_UUID(), email VARCHAR)`,
 	}}
 }
 
 // Ops implements the Opser interface.
-func (w *indexSerial) Ops(
+func (w *unrestrictedUUID) Ops(
 	ctx context.Context, urls []string, reg *histogram.Registry,
 ) (workload.QueryLoad, error) {
 	db, err := gosql.Open(`cockroach`, strings.Join(urls, ` `))
