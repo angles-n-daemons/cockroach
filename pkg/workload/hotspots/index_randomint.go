@@ -8,6 +8,7 @@ package hotspots
 import (
 	"context"
 	gosql "database/sql"
+	"math"
 	"math/rand"
 	"strings"
 
@@ -18,50 +19,47 @@ import (
 	"github.com/spf13/pflag"
 )
 
-type unrestrictedUUID struct {
+type indexRandomINT struct {
 	flags     workload.Flags
 	connFlags *workload.ConnFlags
 
-	idxs        int
-	unique      bool
-	payload     int
-	cycleLength uint64
-	workload    string
+	ranges int
 }
 
 func init() {
-	workload.Register(unrestrictedUUIDMeta)
+	workload.Register(indexRandomINTMeta)
 }
 
-var unrestrictedUUIDMeta = workload.Meta{
-	Name:        `hotspots__unrestricted_uuid`,
+var indexRandomINTMeta = workload.Meta{
+	Name:        `hotspots__random_int`,
 	Description: `Simulate workload similar to hotspot workloads for comparison`,
 	Version:     `1.0.0`,
 	RandomSeed:  RandomSeed,
 	New: func() workload.Generator {
-		g := &unrestrictedUUID{}
+		g := &indexRandomINT{}
 		g.flags.FlagSet = pflag.NewFlagSet(`hotspots`, pflag.ContinueOnError)
+		g.flags.IntVar(&g.ranges, `num-ranges`, 16, `Initial number of ranges to break the tables into`)
 		RandomSeed.AddFlag(&g.flags)
 		g.connFlags = workload.NewConnFlags(&g.flags)
 		return g
 	},
 }
 
-var _ workload.Generator = &unrestrictedUUID{}
-var _ workload.Opser = &unrestrictedUUID{}
-var _ workload.Hookser = &unrestrictedUUID{}
+var _ workload.Generator = &indexRandomINT{}
+var _ workload.Opser = &indexRandomINT{}
+var _ workload.Hookser = &indexRandomINT{}
 
 // Meta implements the Generator interface.
-func (*unrestrictedUUID) Meta() workload.Meta { return unrestrictedUUIDMeta }
+func (*indexRandomINT) Meta() workload.Meta { return indexRandomINTMeta }
 
 // Flags implements the Flagser interface.
-func (w *unrestrictedUUID) Flags() workload.Flags { return w.flags }
+func (w *indexRandomINT) Flags() workload.Flags { return w.flags }
 
 // ConnFlags implements the ConnFlagser interface.
-func (w *unrestrictedUUID) ConnFlags() *workload.ConnFlags { return w.connFlags }
+func (w *indexRandomINT) ConnFlags() *workload.ConnFlags { return w.connFlags }
 
 // Hooks implements the Hookser interface.
-func (w *unrestrictedUUID) Hooks() workload.Hooks {
+func (w *indexRandomINT) Hooks() workload.Hooks {
 	return workload.Hooks{
 		Validate: func() error {
 			return nil
@@ -70,15 +68,19 @@ func (w *unrestrictedUUID) Hooks() workload.Hooks {
 }
 
 // Tables implements the Generator interface.
-func (w *unrestrictedUUID) Tables() []workload.Table {
+func (w *indexRandomINT) Tables() []workload.Table {
 	return []workload.Table{{
 		Name:   `users`,
-		Schema: `(id UUID PRIMARY KEY DEFAULT GEN_RANDOM_UUID(), email VARCHAR)`,
+		Schema: `(id BIGINT PRIMARY KEY, email VARCHAR)`,
+		Splits: workload.Tuples(w.ranges, func(i int) []interface{} {
+			offset := float64(i) / float64(w.ranges)
+			return []interface{}{offset * 9223372036854775807}
+		}),
 	}}
 }
 
 // Ops implements the Opser interface.
-func (w *unrestrictedUUID) Ops(
+func (w *indexRandomINT) Ops(
 	ctx context.Context, urls []string, reg *histogram.Registry,
 ) (workload.QueryLoad, error) {
 	db, err := gosql.Open(`cockroach`, strings.Join(urls, ` `))
@@ -100,13 +102,13 @@ func (w *unrestrictedUUID) Ops(
 		workerFn := func(ctx context.Context) error {
 			start := timeutil.Now()
 
-			query := `INSERT INTO users (email) VALUES ($1)`
+			query := `INSERT INTO users (id, email) VALUES ($1, $2)`
 			updateStmt, err := db.Prepare(query)
 			if err != nil {
 				return errors.CombineErrors(err, db.Close())
 			}
 
-			_, err = updateStmt.Exec(randSeq(rng, 256))
+			_, err = updateStmt.Exec(rand.Float64()*math.MaxInt64, randSeq(rng, 256))
 			elapsed := timeutil.Since(start)
 			hists.Get(`transfer`).Record(elapsed)
 			return err
