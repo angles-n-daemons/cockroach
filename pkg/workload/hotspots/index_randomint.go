@@ -38,7 +38,7 @@ var indexRandomINTMeta = workload.Meta{
 	New: func() workload.Generator {
 		g := &indexRandomINT{}
 		g.flags.FlagSet = pflag.NewFlagSet(`hotspots`, pflag.ContinueOnError)
-		g.flags.IntVar(&g.ranges, `num-ranges`, 16, `Initial number of ranges to break the tables into`)
+		g.flags.IntVar(&g.ranges, `num-ranges`, 32, `Initial number of ranges to break the users table into.`)
 		RandomSeed.AddFlag(&g.flags)
 		g.connFlags = workload.NewConnFlags(&g.flags)
 		return g
@@ -74,7 +74,7 @@ func (w *indexRandomINT) Tables() []workload.Table {
 		Schema: `(id BIGINT PRIMARY KEY, email VARCHAR)`,
 		Splits: workload.Tuples(w.ranges, func(i int) []interface{} {
 			offset := float64(i) / float64(w.ranges)
-			return []interface{}{offset * 9223372036854775807}
+			return []interface{}{offset * math.MaxInt64}
 		}),
 	}}
 }
