@@ -16,6 +16,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/vecindex/quantize"
 	"github.com/cockroachdb/cockroach/pkg/sql/vecindex/vecstore"
 	"github.com/cockroachdb/cockroach/pkg/util/num32"
+	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/vector"
 	"github.com/cockroachdb/errors"
 )
@@ -27,6 +28,9 @@ const RerankMultiplier = 10
 // DeletedMultiplier increases the number of results that will be reranked, in
 // order to account for vectors that may have been deleted in the primary index.
 const DeletedMultiplier = 1.2
+
+// MaxQualitySamples specifies the max value of the QualitySamples index option.
+const MaxQualitySamples = 32
 
 // VectorIndexOptions specifies options that control how the index will be
 // built, as well as default options for how it will be searched. A given search
@@ -72,8 +76,12 @@ type SearchOptions struct {
 	// reduce accuracy. It is currently only used for testing.
 	SkipRerank bool
 	// ReturnVectors specifies whether to return the original full-size vectors
-	// in search results.
+	// in search results. If this is a leaf-level search then the returned
+	// vectors have not been randomized.
 	ReturnVectors bool
+	// UpdateStats specifies whether index statistics will be modified by this
+	// search. These stats are used for adaptive search.
+	UpdateStats bool
 }
 
 // searchContext contains per-thread state needed during index search
@@ -99,6 +107,8 @@ type searchContext struct {
 	// Original and different values in those dimensions.
 	Randomized vector.T
 
+	tempResults         [1]vecstore.SearchResult
+	tempQualitySamples  [MaxQualitySamples]float64
 	tempKeys            []vecstore.PartitionKey
 	tempCounts          []int
 	tempVectorsWithKeys []vecstore.VectorWithKey
@@ -127,15 +137,24 @@ type VectorIndex struct {
 	// fixups runs index maintenance operations like split and merge on a
 	// background goroutine.
 	fixups fixupProcessor
+	// cancel stops the background fixup processing goroutine.
+	cancel func()
+	// stats maintains locally-cached statistics about the vector index that are
+	// used by adaptive search to improve search accuracy.
+	stats statsManager
 }
 
 // NewVectorIndex constructs a new vector index instance. Typically, only one
 // VectorIndex instance should be created for each index in the process.
+// NOTE: If "stopper" is not nil, then the vector index will start a background
+// goroutine to process index fixups. When the index is no longer needed, the
+// caller must call Close to shut down the background goroutine.
 func NewVectorIndex(
 	ctx context.Context,
 	store vecstore.Store,
 	quantizer quantize.Quantizer,
 	options *VectorIndexOptions,
+	stopper *stop.Stopper,
 ) (*VectorIndex, error) {
 	vi := &VectorIndex{
 		options:       *options,
@@ -156,21 +175,58 @@ func NewVectorIndex(
 		vi.options.QualitySamples = 16
 	}
 
+	if vi.options.MaxPartitionSize < 2 {
+		return nil, errors.AssertionFailedf("MaxPartitionSize cannot be less than 2")
+	}
+	if vi.options.QualitySamples > MaxQualitySamples {
+		return nil, errors.Errorf(
+			"QualitySamples option %d exceeds max allowed value", vi.options.QualitySamples)
+	}
+
 	vi.fixups.Init(vi, options.Seed)
+
+	if err := vi.stats.Init(ctx, store); err != nil {
+		return nil, err
+	}
+
+	if stopper != nil {
+		// Start the background goroutine.
+		ctx, vi.cancel = stopper.WithCancelOnQuiesce(ctx)
+		err := stopper.RunAsyncTask(ctx, "vecindex-fixups", vi.fixups.Start)
+		if err != nil {
+			return nil, errors.Wrap(err, "starting fixup processor")
+		}
+	}
 
 	return vi, nil
 }
 
-// CreateRoot creates an empty root partition in the store. This should only be
-// called once when the index is first created.
-func (vi *VectorIndex) CreateRoot(ctx context.Context, txn vecstore.Txn) error {
-	// Use the UnQuantizer because vectors in the root are not quantized.
-	dims := vi.rootQuantizer.GetRandomDims()
-	vectors := vector.MakeSet(dims)
-	rootQuantizedSet := vi.rootQuantizer.Quantize(ctx, &vectors)
-	rootPartition := vecstore.NewPartition(
-		vi.rootQuantizer, rootQuantizedSet, []vecstore.ChildKey{}, vecstore.LeafLevel)
-	return vi.store.SetRootPartition(ctx, txn, rootPartition)
+// Options returns the options that specify how the index should be built and
+// searched.
+func (vi *VectorIndex) Options() VectorIndexOptions {
+	return vi.options
+}
+
+// FormatStats returns index statistics as a formatted string.
+func (vi *VectorIndex) FormatStats() string {
+	return vi.stats.Format()
+}
+
+// Close cancels the background goroutine, if it's running.
+func (vi *VectorIndex) Close() {
+	if vi.cancel != nil {
+		vi.cancel()
+	}
+}
+
+// ProcessFixups waits until all pending fixups have been processed by the
+// background goroutine.
+func (vi *VectorIndex) ProcessFixups() {
+	if vi.cancel == nil {
+		panic(errors.AssertionFailedf(
+			"ProcessFixups cannot be called without a background goroutine running"))
+	}
+	vi.fixups.Wait()
 }
 
 // Insert adds a new vector with the given primary key to the index. This is
@@ -194,6 +250,7 @@ func (vi *VectorIndex) Insert(
 		Options: SearchOptions{
 			BaseBeamSize: vi.options.BaseBeamSize,
 			SkipRerank:   vi.options.DisableErrorBounds,
+			UpdateStats:  true,
 		},
 	}
 	parentSearchCtx.Ctx = internal.WithWorkspace(ctx, &parentSearchCtx.Workspace)
@@ -207,6 +264,64 @@ func (vi *VectorIndex) Insert(
 	// Insert the vector into the secondary index.
 	childKey := vecstore.ChildKey{PrimaryKey: key}
 	return vi.insertHelper(&parentSearchCtx, childKey, true /* allowRetry */)
+}
+
+// Delete attempts to remove a vector from the index, given its value and
+// primary key. This is called within the scope of a transaction so that the
+// index does not appear to change during the delete.
+//
+// NOTE: Delete may not be able to locate the vector in the index, meaning a
+// "dangling vector" reference will be left in the tree. Vector index methods
+// handle this rare case by checking for duplicates when returning search
+// results.
+func (vi *VectorIndex) Delete(
+	ctx context.Context, txn vecstore.Txn, vector vector.T, key vecstore.PrimaryKey,
+) error {
+	// Search for the vector in the index.
+	searchCtx := searchContext{
+		Txn:      txn,
+		Original: vector,
+		Level:    vecstore.LeafLevel,
+		Options: SearchOptions{
+			SkipRerank:  vi.options.DisableErrorBounds,
+			UpdateStats: true,
+		},
+	}
+	searchCtx.Ctx = internal.WithWorkspace(ctx, &searchCtx.Workspace)
+
+	// Randomize the vector if required by the quantizer.
+	tempRandomized := searchCtx.Workspace.AllocVector(vi.quantizer.GetRandomDims())
+	defer searchCtx.Workspace.FreeVector(tempRandomized)
+	vi.quantizer.RandomizeVector(ctx, vector, tempRandomized, false /* invert */)
+	searchCtx.Randomized = tempRandomized
+
+	searchSet := vecstore.SearchSet{MaxResults: 1, MatchKey: key}
+
+	// Search with the base beam size. If that fails to find the vector, try again
+	// with a larger beam size, in order to minimize the chance of dangling
+	// vector references in the index.
+	baseBeamSize := max(vi.options.BaseBeamSize, 1)
+	for {
+		searchCtx.Options.BaseBeamSize = baseBeamSize
+
+		err := vi.searchHelper(&searchCtx, &searchSet, true /* allowRetry */)
+		if err != nil {
+			return err
+		}
+		results := searchSet.PopUnsortedResults()
+		if len(results) == 0 {
+			// Retry search with significantly higher beam size.
+			if baseBeamSize == vi.options.BaseBeamSize {
+				baseBeamSize *= 8
+				continue
+			}
+			return nil
+		}
+
+		// Remove the vector from its partition in the store.
+		_, err = vi.removeFromPartition(ctx, txn, results[0].ParentPartitionKey, results[0].ChildKey)
+		return err
+	}
 }
 
 // Search finds vectors in the index that are closest to the given query vector
@@ -226,7 +341,6 @@ func (vi *VectorIndex) Search(
 		Level:    vecstore.LeafLevel,
 		Options:  options,
 	}
-
 	searchCtx.Ctx = internal.WithWorkspace(ctx, &searchCtx.Workspace)
 
 	// Randomize the vector if required by the quantizer.
@@ -251,7 +365,7 @@ func (vi *VectorIndex) insertHelper(
 	if err != nil {
 		return err
 	}
-	results := searchSet.PopResults()
+	results := searchSet.PopUnsortedResults()
 	parentPartitionKey := results[0].ParentPartitionKey
 	partitionKey := results[0].ChildKey.PartitionKey
 	_, err = vi.addToPartition(parentSearchCtx.Ctx, parentSearchCtx.Txn, parentPartitionKey,
@@ -285,12 +399,14 @@ func (vi *VectorIndex) addToPartition(
 ) (int, error) {
 	count, err := vi.store.AddToPartition(ctx, txn, partitionKey, vector, childKey)
 	if err != nil {
-		return 0, err
+		return 0, errors.Wrapf(err, "adding vector to partition %d", partitionKey)
 	}
 	if count > vi.options.MaxPartitionSize {
 		vi.fixups.AddSplit(ctx, parentPartitionKey, partitionKey)
 	}
-	return count, nil
+
+	err = vi.stats.OnAddOrRemoveVector(ctx)
+	return count, err
 }
 
 // removeFromPartition calls the store to remove a vector, by its key, from an
@@ -301,7 +417,13 @@ func (vi *VectorIndex) removeFromPartition(
 	partitionKey vecstore.PartitionKey,
 	childKey vecstore.ChildKey,
 ) (int, error) {
-	return vi.store.RemoveFromPartition(ctx, txn, partitionKey, childKey)
+	count, err := vi.store.RemoveFromPartition(ctx, txn, partitionKey, childKey)
+	if err != nil {
+		return 0, errors.Wrapf(err, "removing vector from partition %d", partitionKey)
+	}
+
+	err = vi.stats.OnAddOrRemoveVector(ctx)
+	return count, err
 }
 
 // searchHelper contains the core search logic for the K-means tree. It begins
@@ -325,9 +447,9 @@ func (vi *VectorIndex) searchHelper(
 	maxResults := max(
 		searchSet.MaxResults, vi.options.QualitySamples, searchCtx.Options.BaseBeamSize*4)
 	subSearchSet := vecstore.SearchSet{MaxResults: maxResults}
-	searchCtx.tempKeys = ensureSliceLen(searchCtx.tempKeys, 1)
-	searchCtx.tempKeys[0] = vecstore.RootKey
-	searchLevel, err := vi.searchChildPartitions(searchCtx, &subSearchSet, searchCtx.tempKeys)
+	searchCtx.tempResults[0] = vecstore.SearchResult{
+		ChildKey: vecstore.ChildKey{PartitionKey: vecstore.RootKey}}
+	searchLevel, err := vi.searchChildPartitions(searchCtx, &subSearchSet, searchCtx.tempResults[:])
 	if err != nil {
 		return err
 	}
@@ -348,7 +470,7 @@ func (vi *VectorIndex) searchHelper(
 
 	for {
 		results := subSearchSet.PopUnsortedResults()
-		if len(results) == 0 {
+		if len(results) == 0 && searchLevel > vecstore.LeafLevel {
 			// This should never happen, as it means that interior partition(s)
 			// have no children. The vector deletion logic should prevent that.
 			panic(errors.AssertionFailedf(
@@ -357,9 +479,19 @@ func (vi *VectorIndex) searchHelper(
 
 		var zscore float64
 		if searchLevel > vecstore.LeafLevel {
-			// Compute the z-score of the candidate results list.
-			// TODO(andyk): Track z-score stats.
-			zscore = 0
+			// Results need to be sorted in order to calculate their "spread". This
+			// also sorts them for determining which partitions to search next.
+			results.Sort()
+
+			// Compute the Z-score of the candidate list if there are enough
+			// samples. Otherwise, use the default Z-score of 0.
+			if len(results) >= vi.options.QualitySamples {
+				for i := 0; i < vi.options.QualitySamples; i++ {
+					searchCtx.tempQualitySamples[i] = float64(results[i].QuerySquaredDistance)
+				}
+				samples := searchCtx.tempQualitySamples[:vi.options.QualitySamples]
+				zscore = vi.stats.ReportSearch(searchLevel, samples, searchCtx.Options.UpdateStats)
+			}
 		}
 
 		if searchLevel <= searchCtx.Level {
@@ -399,7 +531,7 @@ func (vi *VectorIndex) searchHelper(
 			// more densely packed are the vectors, and the more partitions they're
 			// likely to be spread across.
 			tempBeamSize := float64(beamSize) * math.Pow(2, -zscore)
-			tempBeamSize = max(min(tempBeamSize, float64(beamSize)*4), float64(beamSize)/2)
+			tempBeamSize = max(min(tempBeamSize, float64(beamSize)*2), float64(beamSize)/2)
 
 			if searchLevel > vecstore.LeafLevel+1 {
 				// Use progressively smaller beam size for higher levels, since
@@ -425,17 +557,18 @@ func (vi *VectorIndex) searchHelper(
 				subSearchSet.MaxResults = searchSet.MaxResults * RerankMultiplier / 2
 				subSearchSet.MaxExtraResults = 0
 			}
+
+			if searchLevel > vecstore.LeafLevel {
+				// Ensure there are enough results for calculating stats.
+				subSearchSet.MaxResults = max(subSearchSet.MaxResults, vi.options.QualitySamples)
+			}
 		}
 
-		// Search up to beamSize child partitions.
-		results.Sort()
-		keyCount := min(beamSize, len(results))
-		searchCtx.tempKeys = ensureSliceLen(searchCtx.tempKeys, keyCount)
-		for i := 0; i < keyCount; i++ {
-			searchCtx.tempKeys[i] = results[i].ChildKey.PartitionKey
-		}
-
-		_, err = vi.searchChildPartitions(searchCtx, &subSearchSet, searchCtx.tempKeys)
+		// Search up to beamSize child partitions. The results are in sorted order,
+		// since we always sort non-leaf levels above, and this must be a non-leaf
+		// level (leaf-level partitions do not have children).
+		results = results[:min(beamSize, len(results))]
+		_, err = vi.searchChildPartitions(searchCtx, &subSearchSet, results)
 		if errors.Is(err, vecstore.ErrPartitionNotFound) {
 			// The cached root partition must be stale, so retry the search.
 			if !allowRetry {
@@ -454,23 +587,37 @@ func (vi *VectorIndex) searchHelper(
 	return nil
 }
 
-// searchChildPartitions searches the set of requested partitions for the query
-// vector and adds the closest matches to the given search set.
+// searchChildPartitions searches for nearest neighbors to the query vector in
+// the set of partitions referenced by the given search results. It adds the
+// closest matches to the given search set.
 func (vi *VectorIndex) searchChildPartitions(
-	searchCtx *searchContext, searchSet *vecstore.SearchSet, partitionKeys []vecstore.PartitionKey,
+	searchCtx *searchContext, searchSet *vecstore.SearchSet, parentResults vecstore.SearchResults,
 ) (level vecstore.Level, err error) {
-	searchCtx.tempCounts = ensureSliceLen(searchCtx.tempCounts, len(partitionKeys))
+	searchCtx.tempKeys = ensureSliceLen(searchCtx.tempKeys, len(parentResults))
+	for i := range parentResults {
+		searchCtx.tempKeys[i] = parentResults[i].ChildKey.PartitionKey
+	}
+
+	searchCtx.tempCounts = ensureSliceLen(searchCtx.tempCounts, len(parentResults))
 	level, err = vi.store.SearchPartitions(
-		searchCtx.Ctx, searchCtx.Txn, partitionKeys, searchCtx.Randomized,
+		searchCtx.Ctx, searchCtx.Txn, searchCtx.tempKeys, searchCtx.Randomized,
 		searchSet, searchCtx.tempCounts)
 	if err != nil {
 		return 0, err
 	}
 
-	for i := 0; i < len(searchCtx.tempCounts); i++ {
+	for i := range parentResults {
 		count := searchCtx.tempCounts[i]
 		searchSet.Stats.SearchedPartition(level, count)
-		// TODO(andyk): Enqueue a split/merge fixup for the partition.
+
+		partitionKey := parentResults[i].ChildKey.PartitionKey
+		if count < vi.options.MinPartitionSize && partitionKey != vecstore.RootKey {
+			vi.fixups.AddMerge(
+				searchCtx.Ctx, parentResults[i].ParentPartitionKey, partitionKey)
+		} else if count > vi.options.MaxPartitionSize {
+			vi.fixups.AddSplit(
+				searchCtx.Ctx, parentResults[i].ParentPartitionKey, partitionKey)
+		}
 	}
 
 	return level, nil
@@ -579,7 +726,8 @@ func (vi *VectorIndex) getRerankVectors(
 		// Exclude deleted vectors from results.
 		if candidates[i].Vector == nil {
 			// Vector was deleted, so add fixup to delete it.
-			// TODO(andyk): Enqueue a delete of a vector.
+			vi.fixups.AddDeleteVector(
+				searchCtx.Ctx, candidates[i].ParentPartitionKey, candidates[i].ChildKey.PrimaryKey)
 
 			// Move the last candidate to the current position and reduce size
 			// of slice by one.
@@ -615,15 +763,22 @@ type FormatOptions struct {
 func (vi *VectorIndex) Format(
 	ctx context.Context, txn vecstore.Txn, options FormatOptions,
 ) (str string, err error) {
+	ctx = internal.WithWorkspace(ctx, &internal.Workspace{})
+
+	// Write formatted bytes to this buffer.
 	var buf bytes.Buffer
 
 	// Format each number to 4 decimal places, removing unnecessary trailing
-	// zeros.
+	// zeros. Don't print negative zero, since this causes diffs when running on
+	// Linux vs. Mac.
 	formatFloat := func(value float32) string {
 		s := strconv.FormatFloat(float64(value), 'f', 4, 32)
 		if strings.Contains(s, ".") {
 			s = strings.TrimRight(s, "0")
 			s = strings.TrimRight(s, ".")
+		}
+		if s == "-0" {
+			return "0"
 		}
 		return s
 	}
@@ -674,7 +829,7 @@ func (vi *VectorIndex) Format(
 		// the original vector.
 		random := partition.Centroid()
 		original := make(vector.T, len(random))
-		vi.quantizer.RandomizeVector(ctx, original, random, true /* invert */)
+		vi.quantizer.RandomizeVector(ctx, random, original, true /* invert */)
 		buf.WriteString(parentPrefix)
 		buf.WriteString("• ")
 		buf.WriteString(strconv.FormatInt(int64(partitionKey), 10))

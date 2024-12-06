@@ -169,7 +169,7 @@ type ExprFmtCtx struct {
 
 	// tailCalls allows for quick lookup of all the routines in tail-call position
 	// when the last body statement of a routine is formatted.
-	tailCalls map[*UDFCallExpr]struct{}
+	tailCalls map[opt.ScalarExpr]struct{}
 }
 
 // makeExprFmtCtxForString creates an expression formatting context from a new
@@ -645,6 +645,7 @@ func (f *ExprFmtCtx) formatRelational(e RelExpr, tp treeprinter.Node) {
 			f.formatMutationCols(e, tp, "return-mapping:", t.ReturnCols, t.Table)
 			f.formatOptionalColList(e, tp, "check columns:", t.CheckCols)
 			f.formatOptionalColList(e, tp, "partial index put columns:", t.PartialIndexPutCols)
+			f.formatBeforeTriggers(tp, t.Table, tree.TriggerEventInsert)
 			f.formatMutationCommon(tp, &t.MutationPrivate)
 		}
 
@@ -661,6 +662,7 @@ func (f *ExprFmtCtx) formatRelational(e RelExpr, tp treeprinter.Node) {
 			f.formatOptionalColList(e, tp, "check columns:", t.CheckCols)
 			f.formatOptionalColList(e, tp, "partial index put columns:", t.PartialIndexPutCols)
 			f.formatOptionalColList(e, tp, "partial index del columns:", t.PartialIndexDelCols)
+			f.formatBeforeTriggers(tp, t.Table, tree.TriggerEventUpdate)
 			f.formatMutationCommon(tp, &t.MutationPrivate)
 		}
 
@@ -684,6 +686,7 @@ func (f *ExprFmtCtx) formatRelational(e RelExpr, tp treeprinter.Node) {
 			f.formatOptionalColList(e, tp, "check columns:", t.CheckCols)
 			f.formatOptionalColList(e, tp, "partial index put columns:", t.PartialIndexPutCols)
 			f.formatOptionalColList(e, tp, "partial index del columns:", t.PartialIndexDelCols)
+			f.formatBeforeTriggers(tp, t.Table, tree.TriggerEventInsert, tree.TriggerEventUpdate)
 			f.formatMutationCommon(tp, &t.MutationPrivate)
 		}
 
@@ -696,6 +699,7 @@ func (f *ExprFmtCtx) formatRelational(e RelExpr, tp treeprinter.Node) {
 			f.formatMutationCols(e, tp, "return-mapping:", t.ReturnCols, t.Table)
 			f.formatOptionalColList(e, tp, "passthrough columns", opt.OptionalColList(t.PassthroughCols))
 			f.formatOptionalColList(e, tp, "partial index del columns:", t.PartialIndexDelCols)
+			f.formatBeforeTriggers(tp, t.Table, tree.TriggerEventDelete)
 			f.formatMutationCommon(tp, &t.MutationPrivate)
 		}
 
@@ -985,7 +989,7 @@ func (f *ExprFmtCtx) formatScalarWithLabel(
 				}
 				prevTailCalls := f.tailCalls
 				if i == len(def.Body)-1 {
-					f.tailCalls = make(map[*UDFCallExpr]struct{})
+					f.tailCalls = make(map[opt.ScalarExpr]struct{})
 					ExtractTailCalls(def.Body[i], f.tailCalls)
 				}
 				f.formatExpr(def.Body[i], stmtNode)
@@ -1189,6 +1193,19 @@ func (f *ExprFmtCtx) formatScalarWithLabel(
 		case *TxnControlExpr:
 			formatRoutineArgs(t.Args, tp)
 			formatUDFDefinition(t.Def, tp)
+		case *SubqueryExpr:
+			if _, tailCall := f.tailCalls[t]; tailCall {
+				// Subqueries nested within routines are themselves planned as nested
+				// routines. This subquery is in tail-call position in the parent
+				// routine.
+				tp.Child("tail-call")
+			}
+			prevTailCalls := f.tailCalls
+			f.tailCalls = make(map[opt.ScalarExpr]struct{})
+			ExtractTailCalls(t.Input, f.tailCalls)
+			f.formatExpr(t.Input, tp)
+			f.tailCalls = prevTailCalls
+			intercepted = true
 		}
 	}
 
@@ -1566,6 +1583,23 @@ func (f *ExprFmtCtx) formatMutationCommon(tp treeprinter.Node, p *MutationPrivat
 		c := tp.Childf("after-triggers")
 		for i := range p.AfterTriggers.Triggers {
 			c.Child(p.AfterTriggers.Triggers[i].Name().Normalize())
+		}
+	}
+}
+
+// formatBeforeTriggers displays the names of BEFORE triggers that will be
+// executed for the given table and mutation event types.
+func (f *ExprFmtCtx) formatBeforeTriggers(
+	tp treeprinter.Node, tableID opt.TableID, events ...tree.TriggerEventType,
+) {
+	tab := f.Memo.Metadata().Table(tableID)
+	triggers := cat.GetRowLevelTriggers(
+		tab, tree.TriggerActionTimeBefore, tree.MakeTriggerEventTypeSet(events...),
+	)
+	if len(triggers) > 0 {
+		c := tp.Child("before-triggers")
+		for _, trigger := range triggers {
+			c.Child(trigger.Name().Normalize())
 		}
 	}
 }

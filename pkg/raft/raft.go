@@ -251,12 +251,18 @@ type Config struct {
 	// See: https://github.com/etcd-io/raft/issues/80
 	DisableConfChangeValidation bool
 
+	// TestingDisablePreCampaignStoreLivenessCheck may be used by tests to disable
+	// the check performed by a peer before campaigning to ensure it has
+	// StoreLiveness support from a majority quorum.
+	TestingDisablePreCampaignStoreLivenessCheck bool
+
 	// StoreLiveness is a reference to the store liveness fabric.
 	StoreLiveness raftstoreliveness.StoreLiveness
 
 	// CRDBVersion exposes the active version to Raft. This helps version-gating
 	// features.
 	CRDBVersion clusterversion.Handle
+	Metrics     *Metrics
 }
 
 func (c *Config) validate() error {
@@ -423,12 +429,18 @@ type raft struct {
 	randomizedElectionTimeout int64
 	disableProposalForwarding bool
 
+	// testingDisablePreCampaignStoreLivenessCheck may be used by tests to disable
+	// the check performed by a peer before campaigning to ensure it has
+	// StoreLiveness support from a majority quorum.
+	testingDisablePreCampaignStoreLivenessCheck bool
+
 	tick func()
 	step stepFunc
 
 	logger        raftlogger.Logger
 	storeLiveness raftstoreliveness.StoreLiveness
 	crdbVersion   clusterversion.Handle
+	metrics       *Metrics
 }
 
 func newRaft(c *Config) *raft {
@@ -457,8 +469,10 @@ func newRaft(c *Config) *raft {
 		preVote:                     c.PreVote,
 		disableProposalForwarding:   c.DisableProposalForwarding,
 		disableConfChangeValidation: c.DisableConfChangeValidation,
-		storeLiveness:               c.StoreLiveness,
-		crdbVersion:                 c.CRDBVersion,
+		testingDisablePreCampaignStoreLivenessCheck: c.TestingDisablePreCampaignStoreLivenessCheck,
+		storeLiveness: c.StoreLiveness,
+		crdbVersion:   c.CRDBVersion,
+		metrics:       c.Metrics,
 	}
 	lastID := r.raftLog.lastEntryID()
 
@@ -483,7 +497,26 @@ func newRaft(c *Config) *raft {
 	if c.Applied > 0 {
 		raftlog.appliedTo(c.Applied, 0 /* size */)
 	}
-	r.becomeFollower(r.Term, r.lead)
+
+	if r.lead == r.id {
+		// If we were the leader, we must have waited out the leadMaxSupported. This
+		// is done in the kvserver layer before reaching this point. Therefore, it
+		// should be safe to defortify and become a follower while forgetting that
+		// we were the leader. If we don't forget that we were the leader, it will
+		// lead to situations where r.id == r.lead but r.state != StateLeader which
+		// might confuse the layers above raft.
+		r.deFortify(r.id, r.Term)
+		r.becomeFollower(r.Term, None)
+	} else {
+		// If we weren't the leader, we should NOT forget who the leader is to avoid
+		// regressing the leadMaxSupported. We can't just forget the leader because
+		// we might have been fortifying a leader before the restart and need to
+		// uphold our fortification promise after the restart as well. To do so, we
+		// need to remember the leader and the fortified epoch, otherwise we may
+		// vote for a different candidate or prematurely call an election, either of
+		// which could regress the LeadSupportUntil.
+		r.becomeFollower(r.Term, r.lead)
+	}
 
 	var nodesStrs []string
 	for _, n := range r.trk.VoterNodes() {
@@ -801,6 +834,8 @@ func (r *raft) maybeSendFortify(id pb.PeerID) {
 				"%x leader at term %d does not support itself in the liveness fabric", r.id, r.Term,
 			)
 		}
+
+		r.metrics.SkippedFortificationDueToLackOfSupport.Inc(1)
 		return
 	}
 
@@ -1034,6 +1069,7 @@ func (r *raft) reset(term uint64) {
 		r.setTerm(term)
 	}
 
+	r.lead = None
 	r.electionElapsed = 0
 	r.heartbeatElapsed = 0
 	r.resetRandomizedElectionTimeout()
@@ -1184,15 +1220,21 @@ func (r *raft) tickElection() {
 func (r *raft) tickHeartbeat() {
 	assertTrue(r.state == pb.StateLeader, "tickHeartbeat called by non-leader")
 
+	// Check if we intended to step down. If so, step down if it's safe to do so.
+	// Otherwise, continue doing leader things.
+	if r.fortificationTracker.SteppingDown() && r.fortificationTracker.CanDefortify() {
+		r.becomeFollower(r.fortificationTracker.SteppingDownTerm(), None)
+		return
+	}
+
 	r.heartbeatElapsed++
 	r.electionElapsed++
 
 	if r.electionElapsed >= r.electionTimeout {
 		r.electionElapsed = 0
 		if r.checkQuorum {
-			if err := r.Step(pb.Message{From: r.id, Type: pb.MsgCheckQuorum}); err != nil {
-				r.logger.Debugf("error occurred during checking sending heartbeat: %v", err)
-			} else if r.state != pb.StateLeader {
+			r.checkQuorumActive()
+			if r.state != pb.StateLeader {
 				return // stepped down
 			}
 		}
@@ -1257,12 +1299,20 @@ func (r *raft) becomeFollower(term uint64, lead pb.PeerID) {
 		r.lead = None
 		lead = None
 	}
-	r.step = stepFollower
-	r.reset(term)
-	r.tick = r.tickElection
-	r.setLead(lead)
 	r.state = pb.StateFollower
+	r.step = stepFollower
+	r.tick = r.tickElection
+
+	// Start de-fortifying eagerly so we don't have to wait out a full heartbeat
+	// timeout before sending the first de-fortification message.
+	if r.shouldBcastDeFortify() {
+		r.bcastDeFortify()
+	}
+
+	r.reset(term)
+	r.setLead(lead)
 	r.logger.Infof("%x became follower at term %d", r.id, r.Term)
+	r.logger.Debugf("%x reset election elapsed to %d", r.id, r.electionElapsed)
 }
 
 func (r *raft) becomeCandidate() {
@@ -1323,8 +1373,8 @@ func (r *raft) becomeLeader() {
 	// progress with the last index already.
 	pr := r.trk.Progress(r.id)
 	pr.BecomeReplicate()
-	// The leader always has RecentActive == true; MsgCheckQuorum makes sure to
-	// preserve this.
+	// The leader always has RecentActive == true. The checkQuorumActive method
+	// makes sure to preserve this.
 	pr.RecentActive = true
 
 	// Conservatively set the pendingConfIndex to the last index in the
@@ -1376,9 +1426,11 @@ func (r *raft) hup(t CampaignType) {
 		return
 	}
 
-	// We shouldn't campaign if we don't have quorum support in store liveness.
-	if r.fortificationTracker.RequireQuorumSupportOnCampaign() &&
-		!r.fortificationTracker.QuorumSupported() {
+	// We shouldn't campaign if we don't have quorum support in store liveness. We
+	// only make an exception if this is a leadership transfer, because otherwise
+	// the transfer might fail if the new leader doesn't already have support.
+	if t != campaignTransfer && r.fortificationTracker.RequireQuorumSupportOnCampaign() &&
+		!r.fortificationTracker.QuorumSupported() && !r.testingDisablePreCampaignStoreLivenessCheck {
 		r.logger.Debugf("%x cannot campaign since it's not supported by a quorum in store liveness", r.id)
 		return
 	}
@@ -1539,18 +1591,37 @@ func (r *raft) Step(m pb.Message) error {
 					// larger term. Instead, we need to wait for the leader to learn about
 					// the stranded peer, step down, and defortify. The only thing to do
 					// here is check whether we are that leader, in which case we should
-					// step down to kick off this process of catching up to the term of the
-					// stranded peer.
+					// step down to kick off this process of catching up to the term of
+					// the stranded peer.
+					//
+					// However, the leader can't just blindly step down and defortify.
+					// Doing so could cause LeadSupportUntil to regress. Instead, the
+					// leader checks if it's safe to step down (it can defortify). If it
+					// is, it will step down. Otherwise, it will mark its intention to
+					// step down. This will freeze LeadSupportUntil[1], and eventually the
+					// leader will be able to safely step down.
+					//
+					// [1] When freezing the LeadSupportUntil, we'll also track the term
+					// of the stranded follower. This then allows us to become a follower
+					// at that term and campaign at a term higher to allow the stranded
+					// follower to rejoin. Had we not done this, we may have had to
+					// campaign at a lower term, and then know about the higher term, and
+					// then campaign again at the higher term.
 					if r.state == pb.StateLeader {
-						r.logMsgHigherTerm(m, "stepping down as leader to recover stranded peer")
-						r.becomeFollower(r.Term, r.id)
+						if r.fortificationTracker.CanDefortify() {
+							r.logMsgHigherTerm(m, "stepping down as leader to recover stranded peer")
+							r.deFortify(r.id, m.Term)
+							r.becomeFollower(m.Term, None)
+						} else {
+							r.logMsgHigherTerm(m, "intending to step down as leader to recover stranded peer")
+							r.fortificationTracker.BeginSteppingDown(m.Term)
+						}
 					} else {
 						r.logMsgHigherTerm(m, "ignoring and still supporting fortified leader")
 					}
 				}
 				return nil
 			}
-
 			// If we are willing process a message at a higher term, then make sure we
 			// record that we have withdrawn our support for the current leader, if we
 			// were still providing it with fortification support up to this point.
@@ -1780,36 +1851,6 @@ func stepLeader(r *raft, m pb.Message) error {
 	switch m.Type {
 	case pb.MsgBeat:
 		r.bcastHeartbeat()
-		return nil
-	case pb.MsgCheckQuorum:
-		quorumActiveByHeartbeats := r.trk.QuorumActive()
-		quorumActiveByFortification := r.fortificationTracker.QuorumActive()
-		if !quorumActiveByHeartbeats {
-			r.logger.Debugf(
-				"%x has not received messages from a quorum of peers in the last election timeout", r.id,
-			)
-		}
-		if !quorumActiveByFortification {
-			r.logger.Debugf("%x does not have store liveness support from a quorum of peers", r.id)
-		}
-		if !quorumActiveByHeartbeats && !quorumActiveByFortification {
-			r.logger.Warningf("%x stepped down to follower since quorum is not active", r.id)
-			// NB: Stepping down because of CheckQuorum is a special, in that we know
-			// the LeadSupportUntil is in the past. This means that the leader can
-			// safely call a new election or vote for a different peer without
-			// regressing LeadSupportUntil. We don't need to/want to give this any
-			// special treatment -- instead, we handle this like the general step down
-			// case by simply remembering the term/lead information from our stint as
-			// the leader.
-			r.becomeFollower(r.Term, r.id)
-		}
-		// Mark everyone (but ourselves) as inactive in preparation for the next
-		// CheckQuorum.
-		r.trk.Visit(func(id pb.PeerID, pr *tracker.Progress) {
-			if id != r.id {
-				pr.RecentActive = false
-			}
-		})
 		return nil
 	case pb.MsgProp:
 		if len(m.Entries) == 0 {
@@ -2151,9 +2192,11 @@ func stepLeader(r *raft, m pb.Message) error {
 // stepCandidate is shared by StateCandidate and StatePreCandidate; the difference is
 // whether they respond to MsgVoteResp or MsgPreVoteResp.
 func stepCandidate(r *raft, m pb.Message) error {
-	if IsMsgFromLeader(m.Type) {
+	if IsMsgFromLeader(m.Type) && m.Type != pb.MsgDeFortifyLeader {
 		// If this is a message from a leader of r.Term, transition to a follower
 		// with the sender of the message as the leader, then process the message.
+		// One exception is MsgDeFortifyLeader where it doesn't mean that there is
+		// currently an active leader for this term.
 		assertTrue(m.Term == r.Term, "message term should equal current term")
 		r.becomeFollower(m.Term, m.From)
 		return r.step(r, m) // stepFollower
@@ -2191,7 +2234,7 @@ func stepCandidate(r *raft, m pb.Message) error {
 		case quorum.VoteLost:
 			// pb.MsgPreVoteResp contains future term of pre-candidate
 			// m.Term > r.Term; reuse r.Term
-			r.becomeFollower(r.Term, r.lead)
+			r.becomeFollower(r.Term, None)
 		}
 	}
 	return nil
@@ -2279,6 +2322,34 @@ func stepFollower(r *raft, m pb.Message) error {
 		r.hup(campaignTransfer)
 	}
 	return nil
+}
+
+// checkQuorumActive ensures that the leader is supported by a quorum. If not,
+// the leader steps down to a follower.
+func (r *raft) checkQuorumActive() {
+	assertTrue(r.state == pb.StateLeader, "checkQuorum in a non-leader state")
+
+	quorumActiveByHeartbeats := r.trk.QuorumActive()
+	quorumActiveByFortification := r.fortificationTracker.QuorumActive()
+	if !quorumActiveByHeartbeats {
+		r.logger.Debugf(
+			"%x has not received messages from a quorum of peers in the last election timeout", r.id,
+		)
+	}
+	if !quorumActiveByFortification {
+		r.logger.Debugf("%x does not have store liveness support from a quorum of peers", r.id)
+	}
+	if !quorumActiveByHeartbeats && !quorumActiveByFortification {
+		r.logger.Warningf("%x stepped down to follower since quorum is not active", r.id)
+		r.becomeFollower(r.Term, None)
+	}
+	// Mark everyone (but ourselves) as inactive in preparation for the next
+	// CheckQuorum.
+	r.trk.Visit(func(id pb.PeerID, pr *tracker.Progress) {
+		if id != r.id {
+			pr.RecentActive = false
+		}
+	})
 }
 
 // logSliceFromMsgApp extracts the appended LogSlice from a MsgApp message.
@@ -2458,8 +2529,11 @@ func (r *raft) handleFortifyResp(m pb.Message) {
 		// the follower isn't supporting the leader's store in StoreLiveness or the
 		// follower is down. We'll try to fortify the follower again later in
 		// tickHeartbeat.
+		r.metrics.RejectedFortificationResponses.Inc(1)
 		return
 	}
+
+	r.metrics.AcceptedFortificationResponses.Inc(1)
 	r.fortificationTracker.RecordFortification(m.From, m.LeadEpoch)
 }
 
@@ -2510,20 +2584,18 @@ func (r *raft) deFortify(from pb.PeerID, term uint64) {
 
 	r.resetLeadEpoch()
 
-	if r.state != pb.StateLeader {
-		// The peer is not fortifying the leader anymore. As a result:
-		// 1. We don't want to wait out an entire election timeout before
-		//    campaigning.
-		// 2. But we do want to take advantage of randomized election timeouts built
-		//    into raft to prevent hung elections.
-		// We achieve both of these goals by "forwarding" electionElapsed to begin
-		// at r.electionTimeout. Also see atRandomizedElectionTimeout.
-		r.logger.Debugf(
-			"%d setting election elapsed to start from %d ticks after store liveness support expired",
-			r.id, r.electionTimeout,
-		)
-		r.electionElapsed = r.electionTimeout
-	}
+	// The peer is not fortifying the leader anymore. As a result:
+	// 1. We don't want to wait out an entire election timeout before
+	//    campaigning.
+	// 2. But we do want to take advantage of randomized election timeouts built
+	//    into raft to prevent hung elections.
+	// We achieve both of these goals by "forwarding" electionElapsed to begin
+	// at r.electionTimeout. Also see atRandomizedElectionTimeout.
+	r.logger.Debugf(
+		"%d setting election elapsed to start from %d ticks after store liveness support expired",
+		r.id, r.electionTimeout,
+	)
+	r.electionElapsed = r.electionTimeout
 }
 
 // restore recovers the state machine from a snapshot. It restores the log and the
@@ -2698,9 +2770,12 @@ func (r *raft) switchToConfig(cfg quorum.Config, progressMap tracker.ProgressMap
 		// interruption). This might still drop some proposals but it's better than
 		// nothing.
 		//
-		// NB: Similar to the CheckQuorum step down case, we must remember our
-		// prior stint as leader, lest we regress the QSE.
-		r.becomeFollower(r.Term, r.lead)
+		// A learner can't campaign or participate in elections, and in order for a
+		// learner to get promoted to a voter, it needs a new leader to get elected
+		// and propose that change. Therefore, it should be safe at this point to
+		// defortify and forget that we were the leader at this term and step down.
+		r.deFortify(r.id, r.Term)
+		r.becomeFollower(r.Term, None)
 		return cs
 	}
 
@@ -2766,7 +2841,12 @@ func (r *raft) resetRandomizedElectionTimeout() {
 func (r *raft) transferLeader(to pb.PeerID) {
 	assertTrue(r.state == pb.StateLeader, "only the leader can transfer leadership")
 	r.send(pb.Message{To: to, Type: pb.MsgTimeoutNow})
-	r.becomeFollower(r.Term, r.lead)
+	// When a leader transfers leadership to another replica, it instructs the
+	// replica to campaign without performing the campaign checks. Therefore, it
+	// should be safe to defortify and forget the we were the leader at this term
+	// when stepping down.
+	r.deFortify(r.id, r.Term)
+	r.becomeFollower(r.Term, None)
 }
 
 func (r *raft) abortLeaderTransfer() {

@@ -640,6 +640,11 @@ type RaftConfig struct {
 	//
 	// -1 to disable.
 	RaftDelaySplitToSuppressSnapshot time.Duration
+
+	// TestingDisablePreCampaignStoreLivenessCheck may be used by tests to disable
+	// the check performed by a peer before campaigning to ensure it has
+	// StoreLiveness support from a majority quorum.
+	TestingDisablePreCampaignStoreLivenessCheck bool
 }
 
 // SetDefaults initializes unset fields.
@@ -1053,11 +1058,11 @@ func InheritTempStorageConfig(
 func newTempStorageConfig(
 	ctx context.Context, st *cluster.Settings, inMemory bool, useStore StoreSpec, maxSizeBytes int64,
 ) TempStorageConfig {
-	var monitorName redact.RedactableString
+	var monitorName mon.MonitorName
 	if inMemory {
-		monitorName = "in-mem temp storage"
+		monitorName = mon.MakeMonitorName("in-mem temp storage")
 	} else {
-		monitorName = "temp disk storage"
+		monitorName = mon.MakeMonitorName("temp disk storage")
 	}
 	monitor := mon.NewMonitor(mon.Options{
 		Name:      monitorName,

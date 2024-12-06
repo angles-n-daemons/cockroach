@@ -22,6 +22,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/option"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/registry"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/roachtestutil"
+	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/roachtestutil/task"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/spec"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 	"github.com/cockroachdb/cockroach/pkg/roachprod/install"
@@ -313,20 +314,22 @@ func registerDecommissionBenchSpec(r registry.Registry, benchSpec decommissionBe
 	})
 }
 
-// fireAfter executes fn after the duration elapses. If the context expires
-// first, it will not be executed.
-func fireAfter(ctx context.Context, duration time.Duration, fn func()) {
-	go func() {
+// fireAfter executes fn after the duration elapses. If the passed context, or
+// tasker context, expires first, it will not be executed.
+func fireAfter(ctx context.Context, t task.Tasker, duration time.Duration, fn func()) {
+	t.Go(func(taskCtx context.Context, _ *logger.Logger) error {
 		var fireTimer timeutil.Timer
 		defer fireTimer.Stop()
 		fireTimer.Reset(duration)
 		select {
 		case <-ctx.Done():
+		case <-taskCtx.Done():
 		case <-fireTimer.C:
 			fireTimer.Read = true
 			fn()
 		}
-	}()
+		return nil
+	})
 }
 
 // createDecommissionBenchPerfArtifacts initializes a histogram registry for
@@ -499,16 +502,16 @@ func uploadPerfArtifacts(
 	benchSpec decommissionBenchSpec,
 	pinnedNode, workloadNode int,
 	perfBuf *bytes.Buffer,
-	exporter exporter.Exporter,
 ) {
 	// Store the perf artifacts on the pinned node so that the test
 	// runner copies it into an appropriate directory path.
 
-	destFileName, err := roachtestutil.CreateStatsFileInClusterFromExporter(ctx, t, c, perfBuf, exporter, c.Node(pinnedNode))
+	err := roachtestutil.UploadPerfStats(ctx, t, c, perfBuf, c.Node(pinnedNode), "")
 	if err != nil {
 		t.L().Errorf("error creating perf stats file: %s", err)
 		return
 	}
+	destFileName := roachtestutil.GetBenchmarkMetricsFileName(t)
 	dest := filepath.Join(t.PerfArtifactsDir(), destFileName)
 
 	// Get the workload perf artifacts and move them to the pinned node, so that
@@ -675,6 +678,15 @@ func runDecommissionBench(
 		bytesUsedMetric,
 	)
 
+	defer func() {
+		if err := exporter.Close(func() error {
+			uploadPerfArtifacts(ctx, t, c, benchSpec, pinnedNode, workloadNode, perfBuf)
+			return nil
+		}); err != nil {
+			t.Errorf("error closing perf exporter: %s", err)
+		}
+	}()
+
 	// The logical node id of the current decommissioning node.
 	var targetNodeAtomic uint32
 
@@ -734,8 +746,6 @@ func runDecommissionBench(
 	if err := m.WaitE(); err != nil {
 		t.Fatal(err)
 	}
-
-	uploadPerfArtifacts(ctx, t, c, benchSpec, pinnedNode, workloadNode, perfBuf, exporter)
 }
 
 // runDecommissionBenchLong initializes a cluster with TPCC and attempts to
@@ -807,6 +817,15 @@ func runDecommissionBenchLong(
 		decommissionMetric, upreplicateMetric, bytesUsedMetric,
 	)
 
+	defer func() {
+		if err := exporter.Close(func() error {
+			uploadPerfArtifacts(ctx, t, c, benchSpec, pinnedNode, workloadNode, perfBuf)
+			return nil
+		}); err != nil {
+			t.Errorf("error closing perf exporter: %s", err)
+		}
+	}()
+
 	// The logical node id of the current decommissioning node.
 	var targetNodeAtomic uint32
 
@@ -861,7 +880,6 @@ func runDecommissionBenchLong(
 		t.Fatal(err)
 	}
 
-	uploadPerfArtifacts(ctx, t, c, benchSpec, pinnedNode, workloadNode, perfBuf, exporter)
 }
 
 // runSingleDecommission picks a random node and attempts to decommission that
@@ -977,7 +995,7 @@ func runSingleDecommission(
 
 	if estimateDuration {
 		estimateDecommissionDuration(
-			ctx, h.t.L(), tickByName, snapshotRateMb, bytesUsed, candidateStores,
+			ctx, h.t, h.t.L(), tickByName, snapshotRateMb, bytesUsed, candidateStores,
 			rangeCount, avgBytesPerReplica,
 		)
 	}
@@ -1133,6 +1151,7 @@ func logLSMHealth(ctx context.Context, l *logger.Logger, c cluster.Cluster, targ
 // recorded perf artifacts as ticks.
 func estimateDecommissionDuration(
 	ctx context.Context,
+	t task.Tasker,
 	log *logger.Logger,
 	tickByName func(name string),
 	snapshotRateMb int,
@@ -1170,7 +1189,7 @@ func estimateDecommissionDuration(
 		rangeCount, humanizeutil.IBytes(avgBytesPerReplica), minDuration, estDuration,
 	)
 
-	fireAfter(ctx, estDuration, func() {
+	fireAfter(ctx, t, estDuration, func() {
 		tickByName(estimatedMetric)
 	})
 }

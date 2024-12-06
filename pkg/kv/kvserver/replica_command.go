@@ -966,6 +966,16 @@ func (r *Replica) AdminMerge(
 	}
 }
 
+// waitForApplication is waiting for application at all replicas (voters or
+// non-voters). This is an outlier in that the system is typically expected to
+// function with only a quorum of voters being available. So it should be used
+// extremely sparingly.
+//
+// IMPORTANT: if adding a call to this method, ensure that whatever command is
+// needing this behavior sets
+// ReplicatedEvalResult.DoTimelyApplicationToAllReplicas. That ensures that
+// replication flow control will not arbitrarily delay application on a
+// replica by maintaining a non-empty send-queue.
 func waitForApplication(
 	ctx context.Context,
 	dialer *nodedialer.Dialer,
@@ -3257,16 +3267,6 @@ func (r *Replica) followerSendSnapshot(
 	}
 	defer snap.Close()
 	log.Event(ctx, "generated snapshot")
-
-	// We avoid shipping over the past Raft log in the snapshot by changing the
-	// truncated state (we're allowed to -- it's an unreplicated key and not
-	// subject to mapping across replicas). The actual sending happens in
-	// kvBatchSnapshotStrategy.Send and results in no log entries being sent at
-	// all. Note that Metadata.Index is really the applied index of the replica.
-	snap.State.TruncatedState = &kvserverpb.RaftTruncatedState{
-		Index: kvpb.RaftIndex(snap.RaftSnap.Metadata.Index),
-		Term:  kvpb.RaftTerm(snap.RaftSnap.Metadata.Term),
-	}
 
 	// See comment on DeprecatedUsingAppliedStateKey for why we need to set this
 	// explicitly for snapshots going out to followers.

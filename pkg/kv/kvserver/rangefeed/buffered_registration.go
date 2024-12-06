@@ -81,17 +81,17 @@ func newBufferedRegistration(
 	blockWhenFull bool,
 	metrics *Metrics,
 	stream Stream,
-	unregisterFn func(),
+	removeRegFromProcessor func(registration),
 ) *bufferedRegistration {
 	br := &bufferedRegistration{
 		baseRegistration: baseRegistration{
-			streamCtx:        streamCtx,
-			span:             span,
-			catchUpTimestamp: startTS,
-			withDiff:         withDiff,
-			withFiltering:    withFiltering,
-			withOmitRemote:   withOmitRemote,
-			unreg:            unregisterFn,
+			streamCtx:              streamCtx,
+			span:                   span,
+			catchUpTimestamp:       startTS,
+			withDiff:               withDiff,
+			withFiltering:          withFiltering,
+			withOmitRemote:         withOmitRemote,
+			removeRegFromProcessor: removeRegFromProcessor,
 		},
 		metrics:       metrics,
 		stream:        stream,
@@ -117,9 +117,10 @@ func (br *bufferedRegistration) publish(
 
 	br.mu.Lock()
 	defer br.mu.Unlock()
-	if br.mu.overflowed {
+	if br.mu.overflowed || br.mu.disconnected {
 		return
 	}
+
 	alloc.Use(ctx)
 	select {
 	case br.buf <- e:
@@ -171,6 +172,7 @@ func (br *bufferedRegistration) Disconnect(pErr *kvpb.Error) {
 		}
 		br.mu.disconnected = true
 		br.stream.SendError(pErr)
+		br.removeRegFromProcessor(br)
 	}
 }
 
@@ -254,6 +256,8 @@ func (br *bufferedRegistration) outputLoop(ctx context.Context) error {
 }
 
 func (br *bufferedRegistration) runOutputLoop(ctx context.Context, _forStacks roachpb.RangeID) {
+	defer br.drainAllocations(ctx)
+
 	br.mu.Lock()
 	if br.mu.disconnected {
 		// The registration has already been disconnected.

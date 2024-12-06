@@ -28,8 +28,6 @@ var _ perturbation = backfill{}
 
 func (b backfill) setup() variations {
 	v := setup(b, 40.0)
-	// TODO(#130939): Allow the backfill to complete, without this it can hang indefinitely.
-	v.clusterSettings["bulkio.index_backfill.batch_size"] = "5000"
 	return v
 }
 
@@ -37,10 +35,11 @@ func (b backfill) setupMetamorphic(rng *rand.Rand) variations {
 	v := b.setup()
 	// TODO(#133114): The backfill test can cause OOM with low memory
 	// configurations.
+	v = v.randomize(rng)
 	if v.mem == spec.Low {
 		v.mem = spec.Standard
 	}
-	return v.randomize(rng)
+	return v
 }
 
 // startTargetNode starts the target node and creates the backfill table.

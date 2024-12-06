@@ -199,7 +199,7 @@ func registerRestore(r registry.Registry) {
 							}
 						}
 						require.NoError(t, err)
-						testutils.SucceedsSoon(t, func() error {
+						testutils.SucceedsWithin(t, func() error {
 							var status string
 							sql.QueryRow(t, `SELECT status FROM [SHOW JOB $1]`, jobID).Scan(&status)
 							if status != "paused" {
@@ -208,7 +208,7 @@ func registerRestore(r registry.Registry) {
 							t.L().Printf("paused RESTORE job")
 							pauseIndex++
 							return nil
-						})
+						}, 2*time.Minute)
 
 						t.L().Printf("resuming RESTORE job")
 						sql.Exec(t, `RESUME JOB $1`, jobID)
@@ -1133,6 +1133,7 @@ func exportToRoachperf(
 	writer := io.Writer(bytesBuf)
 
 	exporter.Init(&writer)
+	defer roachtestutil.CloseExporter(ctx, exporter, t, c, bytesBuf, c.Node(1), "")
 	var err error
 	// Ensure the histogram contains the name of the roachtest
 	reg.GetHandle().Get(testName)
@@ -1143,10 +1144,6 @@ func exportToRoachperf(
 	})
 
 	if err != nil {
-		return
-	}
-	if _, err = roachtestutil.CreateStatsFileInClusterFromExporter(ctx, t, c, bytesBuf, exporter, c.Node(1)); err != nil {
-		t.L().Errorf("error creating stats file: %s", err)
 		return
 	}
 }

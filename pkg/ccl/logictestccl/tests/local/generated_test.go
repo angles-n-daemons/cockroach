@@ -145,13 +145,6 @@ func TestCCLLogic_fk_read_committed(
 	runCCLLogicTest(t, "fk_read_committed")
 }
 
-func TestCCLLogic_generic(
-	t *testing.T,
-) {
-	defer leaktest.AfterTest(t)()
-	runCCLLogicTest(t, "generic")
-}
-
 func TestCCLLogic_hash_sharded_index_read_committed(
 	t *testing.T,
 ) {
@@ -374,6 +367,13 @@ func TestCCLLogic_triggers(
 ) {
 	defer leaktest.AfterTest(t)()
 	runCCLLogicTest(t, "triggers")
+}
+
+func TestCCLLogic_triggers_explain(
+	t *testing.T,
+) {
+	defer leaktest.AfterTest(t)()
+	runCCLLogicTest(t, "triggers_explain")
 }
 
 func TestCCLLogic_udf_params(

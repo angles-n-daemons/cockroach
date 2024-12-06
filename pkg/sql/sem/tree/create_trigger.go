@@ -91,6 +91,15 @@ var TriggerActionTimeFromTree = [...]semenumpb.TriggerActionTime{
 	TriggerActionTimeInsteadOf: semenumpb.TriggerActionTime_INSTEAD_OF,
 }
 
+// TriggerActionTimeToTree allows the conversion from a
+// tree.TriggerActionTime to a semenumpb.TriggerActionTime.
+var TriggerActionTimeToTree = [...]TriggerActionTime{
+	semenumpb.TriggerActionTime_ACTION_UNKNOWN: TriggerActionTimeUnknown,
+	semenumpb.TriggerActionTime_BEFORE:         TriggerActionTimeBefore,
+	semenumpb.TriggerActionTime_AFTER:          TriggerActionTimeAfter,
+	semenumpb.TriggerActionTime_INSTEAD_OF:     TriggerActionTimeInsteadOf,
+}
+
 // Format implements the NodeFormatter interface.
 func (node *TriggerActionTime) Format(ctx *FmtCtx) {
 	switch *node {
@@ -126,6 +135,16 @@ var TriggerEventTypeFromTree = [...]semenumpb.TriggerEventType{
 	TriggerEventTruncate:    semenumpb.TriggerEventType_TRUNCATE,
 }
 
+// TriggerEventTypeToTree allows the conversion from a
+// semenumpb.TriggerEventType to a tree.TriggerEventType.
+var TriggerEventTypeToTree = [...]TriggerEventType{
+	semenumpb.TriggerEventType_EVENT_UNKNOWN: TriggerEventTypeUnknown,
+	semenumpb.TriggerEventType_INSERT:        TriggerEventInsert,
+	semenumpb.TriggerEventType_UPDATE:        TriggerEventUpdate,
+	semenumpb.TriggerEventType_DELETE:        TriggerEventDelete,
+	semenumpb.TriggerEventType_TRUNCATE:      TriggerEventTruncate,
+}
+
 // Format implements the NodeFormatter interface.
 func (node *TriggerEventType) Format(ctx *FmtCtx) {
 	switch *node {
@@ -153,6 +172,16 @@ type TriggerEventTypeSet uint8
 
 // Ensure that TriggerEventTypeSet can contain all TriggerEventTypes.
 const _ = TriggerEventTypeSet(1) << TriggerEventTypeMax
+
+// MakeTriggerEventTypeSet creates a TriggerEventTypeSet from a list of
+// TriggerEventType values.
+func MakeTriggerEventTypeSet(types ...TriggerEventType) TriggerEventTypeSet {
+	var s TriggerEventTypeSet
+	for _, t := range types {
+		s.Add(t)
+	}
+	return s
+}
 
 // Add adds a TriggerEventType value to the set.
 func (s *TriggerEventTypeSet) Add(t TriggerEventType) {

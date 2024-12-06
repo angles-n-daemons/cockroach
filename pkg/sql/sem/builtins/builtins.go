@@ -6090,6 +6090,20 @@ SELECT
 			Info:       "This function is used only by CockroachDB's developers for testing purposes.",
 			Volatility: volatility.Immutable,
 		},
+		tree.Overload{
+			Types: tree.ParamTypes{
+				{Name: "raw_key", Typ: types.Bytes},
+			},
+			ReturnType: tree.FixedReturnType(types.String),
+			Fn: func(_ context.Context, _ *eval.Context, args tree.Datums) (tree.Datum, error) {
+				return tree.NewDString(catalogkeys.PrettyKey(
+					nil, /* valDirs */
+					roachpb.Key(tree.MustBeDBytes(args[0])),
+					-1)), nil
+			},
+			Info:       "This function is used only by CockroachDB's developers for testing purposes.",
+			Volatility: volatility.Immutable,
+		},
 	),
 	// Return if a key belongs to a system table, which should make it to print
 	// within redacted output.
@@ -10116,8 +10130,8 @@ func arrayVariadicBuiltin(impls func(*types.T) []tree.Overload) builtinDefinitio
 	}
 	// Prevent usage in DistSQL because it cannot handle arrays of untyped tuples.
 	tupleOverload := impls(types.AnyTuple)
-	for _, t := range tupleOverload {
-		t.DistsqlBlocklist = true
+	for i := range tupleOverload {
+		tupleOverload[i].DistsqlBlocklist = true
 	}
 	overloads = append(overloads, tupleOverload...)
 	return makeBuiltin(
@@ -11984,8 +11998,8 @@ func makeTimestampStatementBuiltinOverload(withOutputTZ bool, withInputTZ bool) 
 			hour := int(tree.MustBeDInt(args[3]))
 			min := int(tree.MustBeDInt(args[4]))
 			sec := float64(tree.MustBeDFloat(args[5]))
-			truncatedSec := math.Floor(sec)
-			nsec := math.Mod(sec, truncatedSec) * float64(time.Second)
+			truncatedSec, remainderSec := math.Modf(sec)
+			nsec := remainderSec * float64(time.Second)
 			t := time.Date(year, month, day, hour, min, int(truncatedSec), int(nsec), location)
 			if withOutputTZ {
 				return tree.MakeDTimestampTZ(t, time.Microsecond)

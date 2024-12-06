@@ -32,6 +32,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/bulk"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvclient"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/kvcoord"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/kvstreamer"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/kvtenant"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/rangefeed"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/rangestats"
@@ -89,6 +90,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire"
 	"github.com/cockroachdb/cockroach/pkg/sql/querycache"
 	"github.com/cockroachdb/cockroach/pkg/sql/rangeprober"
+	"github.com/cockroachdb/cockroach/pkg/sql/rolemembershipcache"
 	"github.com/cockroachdb/cockroach/pkg/sql/scheduledlogging"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scdeps"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scexec"
@@ -435,7 +437,7 @@ var vmoduleSetting = settings.RegisterStringSetting(
 func newRootSQLMemoryMonitor(opts monitorAndMetricsOptions) monitorAndMetrics {
 	rootSQLMetrics := sql.MakeBaseMemMetrics("root", opts.histogramWindowInterval)
 	rootSQLMemoryMonitor := mon.NewMonitor(mon.Options{
-		Name:     "root",
+		Name:     mon.MakeMonitorName("root"),
 		CurCount: rootSQLMetrics.CurBytesCount,
 		MaxHist:  rootSQLMetrics.MaxBytesHist,
 		Settings: opts.settings,
@@ -745,6 +747,8 @@ func newSQLServer(ctx context.Context, cfg sqlServerArgs) (*SQLServer, error) {
 	cfg.registry.AddMetricStruct(rowMetrics)
 	internalRowMetrics := sql.NewRowMetrics(true /* internal */)
 	cfg.registry.AddMetricStruct(internalRowMetrics)
+	kvStreamerMetrics := kvstreamer.MakeMetrics()
+	cfg.registry.AddMetricStruct(kvStreamerMetrics)
 
 	virtualSchemas, err := sql.NewVirtualSchemaHolder(ctx, cfg.Settings)
 	if err != nil {
@@ -839,6 +843,7 @@ func newSQLServer(ctx context.Context, cfg sqlServerArgs) (*SQLServer, error) {
 		Metrics:            &distSQLMetrics,
 		RowMetrics:         &rowMetrics,
 		InternalRowMetrics: &internalRowMetrics,
+		KVStreamerMetrics:  &kvStreamerMetrics,
 
 		SQLLivenessReader: cfg.sqlLivenessProvider.CachedReader(),
 		JobRegistry:       jobRegistry,
@@ -983,8 +988,8 @@ func newSQLServer(ctx context.Context, cfg sqlServerArgs) (*SQLServer, error) {
 		VirtualSchemas:          virtualSchemas,
 		HistogramWindowInterval: cfg.HistogramWindowInterval(),
 		RangeDescriptorCache:    cfg.distSender.RangeDescriptorCache(),
-		RoleMemberCache: sql.NewMembershipCache(
-			serverCacheMemoryMonitor.MakeBoundAccount(), cfg.stopper,
+		RoleMemberCache: rolemembershipcache.NewMembershipCache(
+			serverCacheMemoryMonitor.MakeBoundAccount(), cfg.internalDB, cfg.stopper,
 		),
 		SequenceCacheNode: sessiondatapb.NewSequenceCacheNode(),
 		SessionInitCache: sessioninit.NewCache(
@@ -1173,7 +1178,7 @@ func newSQLServer(ctx context.Context, cfg sqlServerArgs) (*SQLServer, error) {
 	// returning the memory allocated to internalDBMonitor since the
 	// parent monitor is being closed anyway.
 	internalDBMonitor := mon.NewMonitor(mon.Options{
-		Name:       "internal sql executor",
+		Name:       mon.MakeMonitorName("internal sql executor"),
 		CurCount:   internalMemMetrics.CurBytesCount,
 		MaxHist:    internalMemMetrics.MaxBytesHist,
 		Settings:   cfg.Settings,
@@ -1358,21 +1363,21 @@ func newSQLServer(ctx context.Context, cfg sqlServerArgs) (*SQLServer, error) {
 		waitForInstanceReaderStarted,
 	)
 
-	reporter := &diagnostics.Reporter{
-		StartTime:        timeutil.Now(),
-		AmbientCtx:       &cfg.AmbientCtx,
-		Config:           cfg.BaseConfig.Config,
-		Settings:         cfg.Settings,
-		StorageClusterID: cfg.rpcContext.StorageClusterID.Get,
-		LogicalClusterID: clusterIDForSQL.Get,
-		TenantID:         cfg.rpcContext.TenantID,
-		SQLInstanceID:    cfg.nodeIDContainer.SQLInstanceID,
-		SQLServer:        pgServer.SQLServer,
-		InternalExec:     cfg.circularInternalExecutor,
-		DB:               cfg.db,
-		Recorder:         cfg.recorder,
-		Locality:         cfg.Locality,
-	}
+	reporter := diagnostics.NewDiagnosticReporter(
+		timeutil.Now(),
+		&cfg.AmbientCtx,
+		cfg.BaseConfig.Config,
+		cfg.Settings,
+		cfg.rpcContext.StorageClusterID.Get,
+		clusterIDForSQL.Get,
+		cfg.rpcContext.TenantID,
+		cfg.nodeIDContainer.SQLInstanceID,
+		pgServer.SQLServer,
+		cfg.circularInternalExecutor,
+		cfg.db,
+		cfg.recorder,
+		cfg.Locality,
+	)
 
 	if cfg.TestingKnobs.Server != nil {
 		reporter.TestingKnobs = &cfg.TestingKnobs.Server.(*TestingKnobs).DiagnosticsTestingKnobs

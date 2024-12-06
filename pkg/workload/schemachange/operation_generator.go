@@ -306,7 +306,7 @@ func (og *operationGenerator) addColumn(ctx context.Context, tx pgx.Tx) (*opStmt
 		{code: pgcode.DuplicateColumn, condition: columnExistsOnTable},
 		{code: pgcode.UndefinedObject, condition: typ == nil},
 		{code: pgcode.NotNullViolation, condition: hasRows && def.Nullable.Nullability == tree.NotNull},
-		{code: pgcode.FeatureNotSupported, condition: hasAlterPKSchemaChange},
+		{code: pgcode.FeatureNotSupported, condition: hasAlterPKSchemaChange && !og.useDeclarativeSchemaChanger},
 		// UNIQUE is only supported for indexable types.
 		{
 			code:      pgcode.FeatureNotSupported,
@@ -398,7 +398,7 @@ func (og *operationGenerator) addUniqueConstraint(ctx context.Context, tx pgx.Tx
 		{code: pgcode.UndefinedColumn, condition: !columnExistsOnTable},
 		{code: pgcode.DuplicateRelation, condition: constraintExists},
 		{code: pgcode.FeatureNotSupported, condition: columnExistsOnTable && !colinfo.ColumnTypeIsIndexable(columnForConstraint.typ)},
-		{pgcode.FeatureNotSupported, hasAlterPKSchemaChange},
+		{pgcode.FeatureNotSupported, hasAlterPKSchemaChange && !og.useDeclarativeSchemaChanger},
 		{code: pgcode.ObjectNotInPrerequisiteState, condition: databaseHasRegionChange && tableIsRegionalByRow},
 	})
 
@@ -1146,7 +1146,7 @@ func (og *operationGenerator) createIndex(ctx context.Context, tx pgx.Tx) (*opSt
 			{code: pgcode.FeatureNotSupported, condition: regionColStored},
 			{code: pgcode.FeatureNotSupported, condition: duplicateRegionColumn},
 			{code: pgcode.FeatureNotSupported, condition: isStoringVirtualComputed},
-			{code: pgcode.FeatureNotSupported, condition: hasAlterPKSchemaChange},
+			{code: pgcode.FeatureNotSupported, condition: hasAlterPKSchemaChange && !og.useDeclarativeSchemaChanger},
 			{code: pgcode.FeatureNotSupported, condition: lastColInvertedIndexIsDescending},
 			{code: pgcode.FeatureNotSupported, condition: pkColUsedInInvertedIndex},
 		})
@@ -1678,13 +1678,16 @@ func (og *operationGenerator) dropColumn(ctx context.Context, tx pgx.Tx) (*opStm
 		{code: pgcode.UndefinedColumn, condition: !columnExists},
 		{code: pgcode.InvalidColumnReference, condition: colIsPrimaryKey || colIsRefByComputed},
 		{code: pgcode.DependentObjectsStillExist, condition: columnIsDependedOn || columnRemovalWillDropFKBackingIndexes},
-		{code: pgcode.FeatureNotSupported, condition: hasAlterPKSchemaChange},
+		{code: pgcode.FeatureNotSupported, condition: hasAlterPKSchemaChange && !og.useDeclarativeSchemaChanger},
 	})
-	// For legacy schema changer its possible for create index operations to interfere if they
-	// are in progress.
-	if !og.useDeclarativeSchemaChanger {
-		stmt.potentialExecErrors.add(pgcode.ObjectNotInPrerequisiteState)
-	}
+	stmt.potentialExecErrors.addAll(codesWithConditions{
+		// For legacy schema changer its possible for create index operations to interfere if they
+		// are in progress.
+		{code: pgcode.ObjectNotInPrerequisiteState, condition: !og.useDeclarativeSchemaChanger},
+		// It is possible the column we are dropping is in the new primary key,
+		// so a potential error is an invalid reference in this case.
+		{code: pgcode.InvalidColumnReference, condition: og.useDeclarativeSchemaChanger && hasAlterPKSchemaChange},
+	})
 	stmt.sql = fmt.Sprintf(`ALTER TABLE %s DROP COLUMN %s`, tableName.String(), columnName.String())
 	return stmt, nil
 }
@@ -1922,7 +1925,7 @@ func (og *operationGenerator) dropIndex(ctx context.Context, tx pgx.Tx) (*opStmt
 	if err != nil {
 		return nil, err
 	}
-	if hasAlterPKSchemaChange {
+	if hasAlterPKSchemaChange && !og.useDeclarativeSchemaChanger {
 		stmt.expectedExecErrors.add(pgcode.FeatureNotSupported)
 	}
 
@@ -2465,8 +2468,12 @@ func (og *operationGenerator) setColumnNotNull(ctx context.Context, tx pgx.Tx) (
 		}
 		if colContainsNull {
 			og.candidateExpectedCommitErrors.add(pgcode.NotNullViolation)
-			// If executed within the same txn as CREATE TABLE.
-			stmt.potentialExecErrors.add(pgcode.NotNullViolation)
+		}
+		// If we are running with the legacy schema changer, the not null constraint
+		// is enforced during the job phase. So it's still possible to INSERT not null
+		// data before then.
+		if !og.useDeclarativeSchemaChanger {
+			og.potentialCommitErrors.add(pgcode.NotNullViolation)
 		}
 	}
 
@@ -2485,15 +2492,13 @@ func (og *operationGenerator) setColumnType(ctx context.Context, tx pgx.Tx) (*op
 		return nil, err
 	}
 
-	const setSessionVariableString = `SET enable_experimental_alter_column_type_general = true;`
-
 	tableExists, err := og.tableExists(ctx, tx, tableName)
 	if err != nil {
 		return nil, err
 	}
 	if !tableExists {
 		return makeOpStmtForSingleError(OpStmtDDL,
-			fmt.Sprintf(`%s ALTER TABLE %s ALTER COLUMN IrrelevantColumnName SET DATA TYPE IrrelevantDataType`, setSessionVariableString, tableName),
+			fmt.Sprintf(`ALTER TABLE %s ALTER COLUMN IrrelevantColumnName SET DATA TYPE IrrelevantDataType`, tableName),
 			pgcode.UndefinedTable), nil
 	}
 	err = og.tableHasPrimaryKeySwapActive(ctx, tx, tableName)
@@ -2512,8 +2517,8 @@ func (og *operationGenerator) setColumnType(ctx context.Context, tx pgx.Tx) (*op
 	}
 	if !columnExists {
 		return makeOpStmtForSingleError(OpStmtDDL,
-			fmt.Sprintf(`%s ALTER TABLE %s ALTER COLUMN "%s" SET DATA TYPE IrrelevantTypeName`,
-				setSessionVariableString, tableName, columnForTypeChange.name),
+			fmt.Sprintf(`ALTER TABLE %s ALTER COLUMN "%s" SET DATA TYPE IrrelevantTypeName`,
+				tableName, columnForTypeChange.name),
 			pgcode.UndefinedColumn), nil
 	}
 
@@ -2548,8 +2553,7 @@ func (og *operationGenerator) setColumnType(ctx context.Context, tx pgx.Tx) (*op
 		// Some type conversions are allowed, but the values stored with the old column
 		// type are out of range for the new type.
 		stmt.potentialExecErrors.add(pgcode.NumericValueOutOfRange)
-		// TODO(49351): We will remove this when we support alter
-		// type inside a transaction.
+		// This can happen for any attempt to use the legacy schema changer.
 		stmt.potentialExecErrors.add(pgcode.FeatureNotSupported)
 		// We fail if the column we are attempting to alter has a TTL expression.
 		stmt.potentialExecErrors.add(pgcode.InvalidTableDefinition)
@@ -2559,6 +2563,12 @@ func (og *operationGenerator) setColumnType(ctx context.Context, tx pgx.Tx) (*op
 		// We could fail since we don't specify the USING expression, so it's
 		// possible that we could pick a data type that doesn't have an automatic cast.
 		stmt.potentialExecErrors.add(pgcode.DatatypeMismatch)
+		// Failure can occur if we attempt to alter a column that has a dependent
+		// computed column.
+		stmt.potentialExecErrors.add(pgcode.DependentObjectsStillExist)
+		// On older versions, attempts to alter the type will fail with an
+		// experimental feature failure.
+		stmt.potentialExecErrors.add(pgcode.ExperimentalFeature)
 	}
 
 	stmt.potentialExecErrors.addAll(codesWithConditions{
@@ -2566,13 +2576,9 @@ func (og *operationGenerator) setColumnType(ctx context.Context, tx pgx.Tx) (*op
 		{code: pgcode.DependentObjectsStillExist, condition: columnHasDependencies || colIsRefByComputed || hasOngoingAlterPKSchemaChange},
 	})
 
-	// TODO(#134008): Remove this with the PR that fixes this bug.
-	stmt.potentialExecErrors.add(pgcode.DependentObjectsStillExist)
-
-	stmt.sql = fmt.Sprintf(`%s ALTER TABLE %s ALTER COLUMN %s SET DATA TYPE %s`,
-		setSessionVariableString, tableName.String(), columnForTypeChange.name.String(), newTypeName.SQLString())
+	stmt.sql = fmt.Sprintf(`ALTER TABLE %s ALTER COLUMN %s SET DATA TYPE %s`,
+		tableName.String(), columnForTypeChange.name.String(), newTypeName.SQLString())
 	return stmt, nil
-
 }
 
 func (og *operationGenerator) alterTableAlterPrimaryKey(

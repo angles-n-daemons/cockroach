@@ -73,6 +73,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
+	"github.com/cockroachdb/cockroach/pkg/util/tracing/tracingpb"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/logtags"
@@ -2872,7 +2873,20 @@ func TestReplicaLatchingOptimisticEvaluationKeyLimit(t *testing.T) {
 				baReadCopy := baRead.ShallowCopy()
 				baReadCopy.MaxSpanRequestKeys = test.limit
 				go func() {
-					_, pErr := tc.Sender().Send(context.Background(), baReadCopy)
+					// Timeout the test in 30 seconds instead of letting it hang
+					// indefinitely. Moreover, set up tracing, to ensure visibility into
+					// the failure if there is one.
+					ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+					defer cancel()
+					ctx, sp := tracing.EnsureChildSpan(
+						ctx, tc.store.cfg.AmbientCtx.Tracer, "read-req", tracing.WithForceRealSpan(),
+					)
+					sp.SetRecordingType(tracingpb.RecordingVerbose)
+					_, pErr := tc.Sender().Send(ctx, baReadCopy)
+					if pErr != nil {
+						rec := sp.FinishAndGetConfiguredRecording()
+						t.Log(rec)
+					}
 					errCh <- pErr
 				}()
 				if test.interferes {
@@ -8145,6 +8159,9 @@ func TestReplicaRefreshPendingCommandsTicks(t *testing.T) {
 	cfg := TestStoreConfig(nil)
 	// Disable ticks which would interfere with the manual ticking in this test.
 	cfg.RaftTickInterval = time.Hour
+	// Disable pre-campaign store liveness checks because we're disabling ticking
+	// above, and we don't want the first election attempt to guaranteed fail.
+	cfg.TestingDisablePreCampaignStoreLivenessCheck = true
 	stopper := stop.NewStopper()
 	defer stopper.Stop(ctx)
 	tc.StartWithStoreConfig(ctx, t, stopper, cfg)

@@ -30,6 +30,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/rpc"
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
 	"github.com/cockroachdb/cockroach/pkg/util"
+	"github.com/cockroachdb/cockroach/pkg/util/buildutil"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
@@ -185,8 +186,10 @@ func newUninitializedReplicaWithoutRaftGroup(
 	}
 	r.lastProblemRangeReplicateEnqueueTime.Store(store.Clock().PhysicalTime())
 
-	// NB: the state will be loaded when the replica gets initialized.
+	// NB: state and raftTruncState will be loaded when the replica gets
+	// initialized.
 	r.shMu.state = uninitState
+
 	r.rangeStr.store(replicaID, uninitState.Desc)
 	// Add replica log tag - the value is rangeStr.String().
 	r.AmbientContext.AddLogTag("r", &r.rangeStr)
@@ -203,6 +206,22 @@ func newUninitializedReplicaWithoutRaftGroup(
 		store.limiters.BulkIOWriteRate,
 		store.TODOEngine(),
 	)
+	r.raftMu.logStorage = &logstore.LogStore{
+		RangeID:     rangeID,
+		Engine:      store.TODOEngine(),
+		Sideload:    r.raftMu.sideloaded,
+		StateLoader: r.raftMu.stateLoader.StateLoader,
+		// NOTE: use the same SyncWaiter loop for all raft log writes performed by a
+		// given range ID, to ensure that callbacks are processed in order.
+		SyncWaiter: store.syncWaiters[int(rangeID)%len(store.syncWaiters)],
+		EntryCache: store.raftEntryCache,
+		Settings:   store.cfg.Settings,
+		Metrics: logstore.Metrics{
+			RaftLogCommitLatency: store.metrics.RaftLogCommitLatency,
+		},
+		DisableSyncLogWriteToss: buildutil.CrdbTestBuild &&
+			store.TestingKnobs().DisableSyncLogWriteToss,
+	}
 
 	r.splitQueueThrottle = util.Every(splitQueueThrottleDuration)
 	r.mergeQueueThrottle = util.Every(mergeQueueThrottleDuration)
@@ -285,6 +304,10 @@ func (r *Replica) initRaftMuLockedReplicaMuLocked(s kvstorage.LoadedReplicaState
 	r.setStartKeyLocked(desc.StartKey)
 
 	r.shMu.state = s.ReplState
+	if r.shMu.state.ForceFlushIndex != (roachpb.ForceFlushIndex{}) {
+		r.flowControlV2.ForceFlushIndexChangedLocked(context.TODO(), r.shMu.state.ForceFlushIndex.Index)
+	}
+	r.shMu.raftTruncState = s.TruncState
 	r.shMu.lastIndexNotDurable = s.LastIndex
 	r.shMu.lastTermNotDurable = invalidLastTerm
 
@@ -327,6 +350,7 @@ func (r *Replica) initRaftGroupRaftMuLockedReplicaMuLocked() error {
 		r.mu.currentRACv2Mode == rac2.MsgAppPull,
 		&raftLogger{ctx: ctx},
 		(*replicaRLockedStoreLiveness)(r),
+		r.store.raftMetrics,
 	))
 	if err != nil {
 		return err

@@ -458,20 +458,25 @@ func (f *rowBasedFlow) setupRouter(
 	}
 	// Create monitors after successfully connecting the streams.
 	memoryMonitors := make([]*mon.BytesMonitor, len(spec.Streams))
+	unlimitedMemMonitors := make([]*mon.BytesMonitor, len(spec.Streams))
 	diskMonitors := make([]*mon.BytesMonitor, len(spec.Streams))
 	for i := range spec.Streams {
 		memoryMonitors[i] = execinfra.NewLimitedMonitor(
 			ctx, f.Mon, &f.FlowCtx,
-			redact.Sprintf("router-limited-%d", spec.Streams[i].StreamID),
+			"router-limited-"+redact.SafeString(spec.Streams[i].StreamID.String()),
+		)
+		unlimitedMemMonitors[i] = execinfra.NewMonitor(
+			ctx, f.Mon, "router-unlimited-"+redact.SafeString(spec.Streams[i].StreamID.String()),
 		)
 		diskMonitors[i] = execinfra.NewMonitor(
 			ctx, f.DiskMonitor,
-			redact.Sprintf("router-disk-%d", spec.Streams[i].StreamID),
+			"router-disk-"+redact.SafeString(spec.Streams[i].StreamID.String()),
 		)
 	}
 	f.monitors = append(f.monitors, memoryMonitors...)
+	f.monitors = append(f.monitors, unlimitedMemMonitors...)
 	f.monitors = append(f.monitors, diskMonitors...)
-	return makeRouter(spec, streams, memoryMonitors, diskMonitors)
+	return makeRouter(spec, streams, memoryMonitors, unlimitedMemMonitors, diskMonitors)
 }
 
 // Release releases this rowBasedFlow back to the pool.

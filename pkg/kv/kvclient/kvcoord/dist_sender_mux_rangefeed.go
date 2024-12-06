@@ -368,11 +368,15 @@ func (m *rangefeedMuxer) startNodeMuxRangeFeed(
 	nodeID roachpb.NodeID,
 	stream *future.Future[muxStreamOrError],
 ) (retErr error) {
-	ctx = logtags.AddTag(ctx, "mux_n", nodeID)
+
+	tags := &logtags.Buffer{}
+	tags = tags.Add("mux_n", nodeID)
 	// Add "generation" number to the context so that log messages and stacks can
 	// differentiate between multiple instances of mux rangefeed goroutine
 	// (this can happen when one was shutdown, then re-established).
-	ctx = logtags.AddTag(ctx, "gen", atomic.AddInt64(&m.seqID, 1))
+	tags = tags.Add("gen", atomic.AddInt64(&m.seqID, 1))
+
+	ctx = logtags.AddTags(ctx, tags)
 	ctx, restore := pprofutil.SetProfilerLabelsFromCtxTags(ctx)
 	defer restore()
 
@@ -390,6 +394,9 @@ func (m *rangefeedMuxer) startNodeMuxRangeFeed(
 
 	mux, err := client.MuxRangeFeed(ctx)
 	if err != nil {
+		// Remove the mux client from the cache if it hit an
+		// error.
+		m.muxClients.Delete(nodeID)
 		return future.MustSet(stream, muxStreamOrError{err: err})
 	}
 

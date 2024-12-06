@@ -49,6 +49,11 @@ type replicaAppBatch struct {
 	// backing memory has already been provided and which may thus be
 	// modified directly.
 	state kvserverpb.ReplicaState
+	// truncState is this batch's view of the raft log truncation state. It is
+	// copied from under the Replica.mu when the batch is initialized, and remains
+	// constant since raftMu is being held throughout the lifetime of this batch.
+	truncState kvserverpb.RaftTruncatedState
+
 	// closedTimestampSetter maintains historical information about the
 	// advancement of the closed timestamp.
 	closedTimestampSetter closedTimestampSetterInfo
@@ -158,7 +163,9 @@ func (b *replicaAppBatch) Stage(
 	// non-trivial commands will be in their own batch, so delaying their
 	// non-trivial ReplicatedState updates until later (without ever staging
 	// them in the batch) is sufficient.
-	b.stageTrivialReplicatedEvalResult(ctx, cmd)
+	if err := b.stageTrivialReplicatedEvalResult(ctx, cmd); err != nil {
+		return nil, err
+	}
 	b.ab.numEntriesProcessed++
 	size := len(cmd.Data)
 	b.ab.numEntriesProcessedBytes += int64(size)
@@ -400,7 +407,7 @@ func (b *replicaAppBatch) runPostAddTriggersReplicaOnly(
 		res.State.GCThreshold = nil
 	}
 
-	if res.State != nil && res.State.TruncatedState != nil {
+	if truncatedState := res.GetRaftTruncatedState(); truncatedState != nil {
 		var err error
 		// Typically one should not be checking the cluster version below raft,
 		// since it can cause state machine divergence. However, this check is
@@ -422,13 +429,14 @@ func (b *replicaAppBatch) runPostAddTriggersReplicaOnly(
 		apply := !looselyCoupledTruncation || res.RaftExpectedFirstIndex == 0
 		if apply {
 			if apply, err = handleTruncatedStateBelowRaftPreApply(
-				ctx, b.state.TruncatedState, res.State.TruncatedState, b.r.raftMu.stateLoader, b.batch,
+				ctx, b.truncState, truncatedState,
+				b.r.raftMu.stateLoader.StateLoader, b.batch,
 			); err != nil {
 				return errors.Wrap(err, "unable to handle truncated state")
 			}
 		} else {
 			b.r.store.raftTruncator.addPendingTruncation(
-				ctx, (*raftTruncatorReplica)(b.r), *res.State.TruncatedState, res.RaftExpectedFirstIndex,
+				ctx, (*raftTruncatorReplica)(b.r), *truncatedState, res.RaftExpectedFirstIndex,
 				res.RaftLogDelta)
 		}
 		if apply {
@@ -444,7 +452,7 @@ func (b *replicaAppBatch) runPostAddTriggersReplicaOnly(
 			// coupled truncation mechanism in the other branch already ensures
 			// enacting truncations only after state machine synced.
 			if has, err := b.r.raftMu.sideloaded.HasAnyEntry(
-				ctx, b.state.TruncatedState.Index, res.State.TruncatedState.Index+1, // include end Index
+				ctx, b.truncState.Index, truncatedState.Index+1, // include end Index
 			); err != nil {
 				return errors.Wrap(err, "failed searching for sideloaded entries")
 			} else if has {
@@ -453,7 +461,10 @@ func (b *replicaAppBatch) runPostAddTriggersReplicaOnly(
 		} else {
 			// The truncated state was discarded, or we are queuing a pending
 			// truncation, so make sure we don't apply it to our in-memory state.
-			res.State.TruncatedState = nil
+			if res.State != nil {
+				res.State.TruncatedState = nil
+			}
+			res.RaftTruncatedState = nil
 			res.RaftLogDelta = 0
 			res.RaftExpectedFirstIndex = 0
 			if !looselyCoupledTruncation {
@@ -538,7 +549,7 @@ func (b *replicaAppBatch) runPostAddTriggersReplicaOnly(
 // inspect the command's ReplicatedEvalResult.
 func (b *replicaAppBatch) stageTrivialReplicatedEvalResult(
 	ctx context.Context, cmd *replicatedCmd,
-) {
+) error {
 	b.state.RaftAppliedIndex = cmd.Index()
 	b.state.RaftAppliedIndexTerm = kvpb.RaftTerm(cmd.Term)
 
@@ -560,6 +571,19 @@ func (b *replicaAppBatch) stageTrivialReplicatedEvalResult(
 	// serialize on the stats key.
 	deltaStats := res.Delta.ToStats()
 	b.state.Stats.Add(deltaStats)
+
+	if res.DoTimelyApplicationToAllReplicas && !b.changeRemovesReplica {
+		// Update in-memory and persistent state. A later command accumulated in
+		// this batch may update these again. Also, a later command may set
+		// changeRemovesReplica to true and wipe out the state in the batch. These
+		// are all safe.
+		b.state.ForceFlushIndex = roachpb.ForceFlushIndex{Index: cmd.Entry.Index}
+		if err := b.r.raftMu.stateLoader.SetForceFlushIndex(
+			ctx, b.batch, b.state.Stats, &b.state.ForceFlushIndex); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // ApplyToStateMachine implements the apply.Batch interface. The method handles
@@ -630,8 +654,13 @@ func (b *replicaAppBatch) ApplyToStateMachine(ctx context.Context) error {
 		logcrash.ReportOrPanic(ctx, &b.r.ClusterSettings().SV, "%v", err)
 	}
 	r.mu.closedTimestampSetter = b.closedTimestampSetter
-
 	closedTimestampUpdated := r.shMu.state.RaftClosedTimestamp.Forward(b.state.RaftClosedTimestamp)
+
+	if b.state.ForceFlushIndex != r.shMu.state.ForceFlushIndex {
+		r.shMu.state.ForceFlushIndex = b.state.ForceFlushIndex
+		r.flowControlV2.ForceFlushIndexChangedLocked(ctx, b.state.ForceFlushIndex.Index)
+	}
+
 	prevStats := *r.shMu.state.Stats
 	*r.shMu.state.Stats = *b.state.Stats
 

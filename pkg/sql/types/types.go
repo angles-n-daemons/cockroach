@@ -971,6 +971,21 @@ func MakeCollatedString(strType *T, locale string) *T {
 	panic(errors.AssertionFailedf("cannot apply collation to non-string type: %s", strType))
 }
 
+// MakeCollatedType is like MakeCollatedString but also handles NULL and arrays
+// of string types that need to become arrays of collated string types.
+//
+// UNKNOWN  => STRING COLLATE EN
+// []STRING => []STRING COLLATE EN
+func MakeCollatedType(typ *T, locale string) *T {
+	if typ.Family() == ArrayFamily {
+		return MakeArray(MakeCollatedType(typ.ArrayContents(), locale))
+	}
+	if typ.Family() == UnknownFamily {
+		return MakeCollatedType(String, locale)
+	}
+	return MakeCollatedString(typ, locale)
+}
+
 // MakeDecimal constructs a new instance of a DECIMAL type (oid = T_numeric)
 // that has at most "precision" # of decimal digits (0 = unspecified number of
 // digits) and at most "scale" # of decimal digits after the decimal point
@@ -2808,6 +2823,8 @@ func (t *T) IsNumeric() bool {
 	}
 }
 
+var EnumValueNotFound = errors.New("could not find enum value")
+
 // EnumGetIdxOfPhysical returns the index within the TypeMeta's slice of
 // enum physical representations that matches the input byte slice.
 func (t *T) EnumGetIdxOfPhysical(phys []byte) (int, error) {
@@ -2820,7 +2837,7 @@ func (t *T) EnumGetIdxOfPhysical(phys []byte) (int, error) {
 			return i, nil
 		}
 	}
-	err := errors.Newf(
+	err := errors.Wrapf(EnumValueNotFound,
 		"could not find %v in enum %q representation %s %s",
 		phys,
 		t.TypeMeta.Name.FQName(true /* explicitCatalog */),

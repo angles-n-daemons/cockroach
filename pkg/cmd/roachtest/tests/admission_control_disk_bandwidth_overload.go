@@ -39,7 +39,7 @@ func registerDiskBandwidthOverload(r registry.Registry) {
 		CompatibleClouds: registry.AllExceptAzure,
 		// TODO(aaditya): change to weekly once the test stabilizes.
 		Suites:          registry.Suites(registry.Nightly),
-		Cluster:         r.MakeClusterSpec(2, spec.CPU(8), spec.WorkloadNode()),
+		Cluster:         r.MakeClusterSpec(2, spec.CPU(8), spec.WorkloadNode(), spec.ReuseNone()),
 		RequiresLicense: true,
 		Leases:          registry.MetamorphicLeases,
 		Run: func(ctx context.Context, t test.Test, c cluster.Cluster) {
@@ -104,7 +104,7 @@ func registerDiskBandwidthOverload(r registry.Registry) {
 					"read-percent": "50",
 				}
 				url := fmt.Sprintf(" {pgurl%s}", c.CRDBNodes())
-				cmd := fmt.Sprintf("./cockroach workload run kv %s--concurrency=2 "+
+				cmd := fmt.Sprintf("./cockroach workload run kv %s --concurrency=2 "+
 					"--splits=1000 --read-percent=50 --min-block-bytes=1024 --max-block-bytes=1024 "+
 					"--txn-qos='regular' --tolerate-errors %s %s %s",
 					roachtestutil.GetWorkloadHistogramArgs(t, c, labels), foregroundDB, dur, url)

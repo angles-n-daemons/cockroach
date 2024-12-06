@@ -13,8 +13,10 @@ import (
 	"io"
 	"math"
 	"math/rand"
+	"os"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -74,7 +76,7 @@ type variations struct {
 	// These fields are set up during construction.
 	seed                 int64
 	fillDuration         time.Duration
-	maxBlockBytes        int
+	blockSize            int
 	perturbationDuration time.Duration
 	validationDuration   time.Duration
 	ratioOfMax           float64
@@ -89,6 +91,8 @@ type variations struct {
 	workload             workloadType
 	acceptableChange     float64
 	cloud                registry.CloudSet
+	acMode               admissionControlMode
+	diskBandwidthLimit   string
 	profileOptions       []roachtestutil.ProfileOptionFunc
 	specOptions          []spec.Option
 	clusterSettings      map[string]string
@@ -98,12 +102,14 @@ const NUM_REGIONS = 3
 
 var durationOptions = []time.Duration{10 * time.Second, 10 * time.Minute, 30 * time.Minute}
 var splitOptions = []int{1, 100, 10000}
-var maxBlockBytes = []int{1, 1024, 4096}
+var blockSize = []int{1, 1024, 4096}
 var numNodes = []int{5, 12, 30}
 var numVCPUs = []int{4, 8, 16, 32}
 var numDisks = []int{1, 2}
 var memOptions = []spec.MemPerCPU{spec.Low, spec.Standard, spec.High}
 var cloudSets = []registry.CloudSet{registry.OnlyAWS, registry.OnlyGCE, registry.OnlyAzure}
+var admissionControlOptions = []admissionControlMode{elasticOnlyBoth, fullNormalElasticRepl, fullBoth}
+var diskBandwidthLimitOptions = []string{"0", "350MiB"}
 
 var leases = []registry.LeaseType{
 	registry.EpochLeases,
@@ -111,13 +117,97 @@ var leases = []registry.LeaseType{
 	registry.ExpirationLeases,
 }
 
-func (v variations) String() string {
-	return fmt.Sprintf("seed: %d, fillDuration: %s, maxBlockBytes: %d, perturbationDuration: %s, "+
-		"validationDuration: %s, ratioOfMax: %f, splits: %d, numNodes: %d, numWorkloadNodes: %d, "+
-		"vcpu: %d, disks: %d, memory: %s, leaseType: %s, cloud: %v, perturbation: %+v",
-		v.seed, v.fillDuration, v.maxBlockBytes,
-		v.perturbationDuration, v.validationDuration, v.ratioOfMax, v.splits, v.numNodes, v.numWorkloadNodes,
-		v.vcpu, v.disks, v.mem, v.leaseType, v.cloud, v.perturbation)
+type admissionControlMode int
+
+const (
+	// defaultOption uses the releases default settings for admission control.
+	defaultOption = admissionControlMode(iota)
+	// disabled fully disables admission control.
+	disabled
+	// elasticOnlyNoRepl applies normal admission control to elastic traffic, no
+	// replication admission control.
+	elasticOnlyNoRepl
+	// elasticOnlyBoth applies normal admission control to elastic traffic, and
+	// elastic replication admission control.
+	elasticOnlyBoth
+	// fullNormalElasticRepl applies normal admission control to elastic
+	// traffic, and elastic replication admission control.
+	fullNormalElasticRepl
+	// fullBoth applies admission control to all elastic and normal traffic.
+	fullBoth
+)
+
+func (a admissionControlMode) String() string {
+	switch a {
+	case disabled:
+		return "none"
+	case elasticOnlyNoRepl:
+		return "elasticOnlyNoRepl"
+	case elasticOnlyBoth:
+		return "elasticOnlyBoth"
+	case fullNormalElasticRepl:
+		return "fullNormalElasticRepl"
+	case fullBoth:
+		return "fullBoth"
+	case defaultOption:
+		return "defaultOption"
+	default:
+		return "unknown"
+	}
+}
+
+func (a admissionControlMode) getSettings() map[string]string {
+	switch a {
+	case disabled:
+		return map[string]string{
+			"admission.kv.enabled":             "false",
+			"kvadmission.flow_control.enabled": "false",
+		}
+	case elasticOnlyNoRepl:
+		return map[string]string{
+			"admission.kv.bulk_only.enabled":   "true",
+			"kvadmission.flow_control.enabled": "false",
+		}
+	case elasticOnlyBoth:
+		return map[string]string{
+			"admission.kv.bulk_only.enabled": "true",
+			"kvadmission.flow_control.mode":  "apply_to_elastic",
+		}
+	case fullNormalElasticRepl:
+		return map[string]string{
+			"kvadmission.flow_control.mode": "apply_to_elastic",
+		}
+	case fullBoth:
+		return map[string]string{
+			"kvadmission.flow_control.mode": "apply_to_all",
+		}
+	default:
+		return map[string]string{}
+	}
+}
+
+// getParameterMap returns a map of the parameters used for the test in
+// stringified format. They can be used in logging to more easily identify the
+// test reproduction.
+func (v variations) getParameterMap() map[string]string {
+	params := map[string]string{}
+	params["seed"] = strconv.FormatInt(v.seed, 10)
+	params["fillDuration"] = v.fillDuration.String()
+	params["blockSize"] = strconv.Itoa(v.blockSize)
+	params["perturbationDuration"] = v.perturbationDuration.String()
+	params["validationDuration"] = v.validationDuration.String()
+	params["ratioOfMax"] = strconv.FormatFloat(v.ratioOfMax, 'f', -1, 64)
+	params["splits"] = strconv.Itoa(v.splits)
+	params["numNodes"] = strconv.Itoa(v.numNodes)
+	params["numWorkloadNodes"] = strconv.Itoa(v.numWorkloadNodes)
+	params["vcpu"] = strconv.Itoa(v.vcpu)
+	params["disks"] = strconv.Itoa(v.disks)
+	params["mem"] = v.mem.String()
+	params["leaseType"] = v.leaseType.String()
+	params["cloud"] = v.cloud.String()
+	params["acMode"] = v.acMode.String()
+	params["diskBandwidthLimit"] = v.diskBandwidthLimit
+	return params
 }
 
 // Normally a single worker can handle 20-40 nodes. If we find this is
@@ -127,7 +217,7 @@ const numNodesPerWorker = 20
 // randomize will randomize the test parameters for a metamorphic run.
 func (v variations) randomize(rng *rand.Rand) variations {
 	v.splits = splitOptions[rng.Intn(len(splitOptions))]
-	v.maxBlockBytes = maxBlockBytes[rng.Intn(len(maxBlockBytes))]
+	v.blockSize = blockSize[rng.Intn(len(blockSize))]
 	v.perturbationDuration = durationOptions[rng.Intn(len(durationOptions))]
 	v.leaseType = leases[rng.Intn(len(leases))]
 	v.numNodes = numNodes[rng.Intn(len(numNodes))]
@@ -139,6 +229,8 @@ func (v variations) randomize(rng *rand.Rand) variations {
 	// as they have limitations on configurations that can run.
 	v.cloud = registry.OnlyGCE
 	v.mem = memOptions[rng.Intn(len(memOptions))]
+	v.acMode = admissionControlOptions[rng.Intn(len(admissionControlOptions))]
+	v.diskBandwidthLimit = diskBandwidthLimitOptions[rng.Intn(len(diskBandwidthLimitOptions))]
 	return v
 }
 
@@ -147,7 +239,7 @@ func setup(p perturbation, acceptableChange float64) variations {
 	v := variations{}
 	v.workload = kvWorkload{}
 	v.leaseType = registry.EpochLeases
-	v.maxBlockBytes = 4096
+	v.blockSize = 4096
 	v.splits = 10000
 	v.numNodes = 12
 	v.numWorkloadNodes = v.numNodes/numNodesPerWorker + 1
@@ -159,6 +251,7 @@ func setup(p perturbation, acceptableChange float64) variations {
 	v.ratioOfMax = 0.5
 	v.cloud = registry.OnlyGCE
 	v.mem = spec.Standard
+	v.diskBandwidthLimit = "0"
 	v.perturbation = p
 	v.profileOptions = []roachtestutil.ProfileOptionFunc{
 		roachtestutil.ProfDbName("target"),
@@ -169,8 +262,6 @@ func setup(p perturbation, acceptableChange float64) variations {
 	}
 	v.acceptableChange = acceptableChange
 	v.clusterSettings = make(map[string]string)
-	// Enable raft tracing. Remove this once raft tracing is the default.
-	v.clusterSettings["kv.raft.max_concurrent_traces"] = "10"
 	return v
 }
 
@@ -191,10 +282,12 @@ func RegisterTests(r registry.Registry) {
 	register(r, backfill{})
 	register(r, &slowDisk{})
 	register(r, elasticWorkload{})
+	register(r, intents{})
+	register(r, backup{})
 }
 
 func (v variations) makeClusterSpec() spec.ClusterSpec {
-	opts := append(v.specOptions, spec.CPU(v.vcpu), spec.SSD(v.disks), spec.Mem(v.mem))
+	opts := append(v.specOptions, spec.CPU(v.vcpu), spec.SSD(v.disks), spec.Mem(v.mem), spec.TerminateOnMigration())
 	return spec.MakeClusterSpec(v.numNodes+v.numWorkloadNodes, opts...)
 }
 
@@ -206,10 +299,92 @@ func (v variations) perturbationName() string {
 	return t.Name()
 }
 
+// finishSetup completes initialization of the variations.
+func (v variations) finishSetup() variations {
+	// Apply any environment variable overrides first.
+	if overrides, found := os.LookupEnv("PERTURBATION_OVERRIDE"); found {
+		for _, override := range strings.Split(overrides, ",") {
+			parts := strings.Split(override, "=")
+			if err := v.applyEnvOverride(parts[0], parts[1]); err != nil {
+				panic(fmt.Sprintf("can't apply override: %s: %v", override, err))
+			}
+		}
+	}
+
+	for k, val := range v.acMode.getSettings() {
+		v.clusterSettings[k] = val
+	}
+	// Enable raft tracing. Remove this once raft tracing is the default.
+	v.clusterSettings["kv.raft.max_concurrent_traces"] = "10"
+	v.clusterSettings["kvadmission.store.provisioned_bandwidth"] = v.diskBandwidthLimit
+	return v
+}
+
+// applyEnvOverride applies a single override to the test.
+func (v *variations) applyEnvOverride(key string, val string) (err error) {
+	switch key {
+	case "fillDuration":
+		v.fillDuration, err = time.ParseDuration(val)
+	case "blockSize":
+		v.blockSize, err = strconv.Atoi(val)
+	case "perturbationDuration":
+		v.perturbationDuration, err = time.ParseDuration(val)
+	case "validationDuration":
+		v.validationDuration, err = time.ParseDuration(val)
+	case "ratioOfMax":
+		v.ratioOfMax, err = strconv.ParseFloat(val, 64)
+	case "splits":
+		v.splits, err = strconv.Atoi(val)
+	case "numNodes":
+		v.numNodes, err = strconv.Atoi(val)
+	case "numWorkloadNodes":
+		v.numWorkloadNodes, err = strconv.Atoi(val)
+	case "vcpu":
+		v.vcpu, err = strconv.Atoi(val)
+	case "disks":
+		v.disks, err = strconv.Atoi(val)
+	case "mem":
+		v.mem = spec.ParseMemCPU(val)
+		if v.mem == -1 {
+			err = errors.Errorf("unknown memory setting: %s", val)
+		}
+	case "diskBandwidthLimit":
+		v.diskBandwidthLimit = val
+	case "leaseType":
+		for _, l := range leases {
+			if l.String() == val {
+				v.leaseType = l
+				return nil
+			}
+		}
+		return errors.Errorf("unknown lease type: %s", val)
+	case "cloud":
+		for _, c := range cloudSets {
+			if c.String() == val {
+				v.cloud = c
+				return nil
+			}
+		}
+		return errors.Errorf("unknown cloud: %s", val)
+	case "acMode":
+		for _, a := range admissionControlOptions {
+			if a.String() == val {
+				v.acMode = a
+				return nil
+			}
+		}
+		return errors.Errorf("unknown admission control mode: %s", val)
+	default:
+		return errors.Errorf("unknown key: %s", key)
+	}
+	return err
+}
+
 func addMetamorphic(r registry.Registry, p perturbation) {
 	rng, seed := randutil.NewPseudoRand()
 	v := p.setupMetamorphic(rng)
 	v.seed = seed
+	v = v.finishSetup()
 	r.Add(registry.TestSpec{
 		Name:             fmt.Sprintf("perturbation/metamorphic/%s", v.perturbationName()),
 		CompatibleClouds: v.cloud,
@@ -224,6 +399,7 @@ func addMetamorphic(r registry.Registry, p perturbation) {
 
 func addFull(r registry.Registry, p perturbation) {
 	v := p.setup()
+	v = v.finishSetup()
 	r.Add(registry.TestSpec{
 		Name:             fmt.Sprintf("perturbation/full/%s", v.perturbationName()),
 		CompatibleClouds: v.cloud,
@@ -261,6 +437,7 @@ func addDev(r registry.Registry, p perturbation) {
 
 	// Allow the test to run on dev machines.
 	v.cloud = registry.AllClouds
+	v = v.finishSetup()
 	r.Add(registry.TestSpec{
 		Name:             fmt.Sprintf("perturbation/dev/%s", v.perturbationName()),
 		CompatibleClouds: v.cloud,
@@ -400,7 +577,11 @@ func (w workloadData) worstStats(i interval) map[string]trackedStat {
 // runTest is the main entry point for all the tests. Its ste
 func (v variations) runTest(ctx context.Context, t test.Test, c cluster.Cluster) {
 	v.Cluster = c
-	t.L().Printf("test variations are: %+v", v)
+	params := v.getParameterMap()
+	for k, val := range params {
+		t.AddParam(k, val)
+		t.L().Printf("%s: %s", k, val)
+	}
 	t.Status("T0: starting nodes")
 
 	// Track the three operations that we are sending in this test.
@@ -481,9 +662,7 @@ func (v variations) runTest(ctx context.Context, t test.Test, c cluster.Cluster)
 
 	t.Status("T5: validating results")
 	require.NoError(t, roachtestutil.DownloadProfiles(ctx, c, t.L(), t.ArtifactsDir()))
-
-	require.NoError(t, v.writePerfArtifacts(ctx, t, c, baselineStats, perturbationStats,
-		afterStats))
+	require.NoError(t, v.writePerfArtifacts(ctx, t, baselineStats, perturbationStats, afterStats))
 
 	t.L().Printf("validating stats during the perturbation")
 	failures := isAcceptableChange(t.L(), baselineStats, perturbationStats, v.acceptableChange)
@@ -497,7 +676,9 @@ func (v variations) applyClusterSettings(ctx context.Context, t test.Test) {
 	db := v.Conn(ctx, t.L(), 1)
 	defer db.Close()
 	for key, value := range v.clusterSettings {
-		if _, err := db.ExecContext(ctx, fmt.Sprintf("SET CLUSTER SETTING %s = '%s'", key, value)); err != nil {
+		setCmd := fmt.Sprintf("SET CLUSTER SETTING %s = '%s'", key, value)
+		t.L().Printf(setCmd)
+		if _, err := db.ExecContext(ctx, setCmd); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -685,13 +866,10 @@ func sortedStringKeys(m map[string]trackedStat) []string {
 // can be picked up by roachperf. Currently it only writes the write stats since
 // there would be too many lines on the graph otherwise.
 func (v variations) writePerfArtifacts(
-	ctx context.Context,
-	t test.Test,
-	c cluster.Cluster,
-	baseline, perturbation, recovery map[string]trackedStat,
+	ctx context.Context, t test.Test, baseline, perturbation, recovery map[string]trackedStat,
 ) error {
 
-	exporter := roachtestutil.CreateWorkloadHistogramExporter(t, c)
+	exporter := roachtestutil.CreateWorkloadHistogramExporter(t, v)
 
 	reg := histogram.NewRegistryWithExporter(
 		time.Second,
@@ -702,6 +880,7 @@ func (v variations) writePerfArtifacts(
 	bytesBuf := bytes.NewBuffer([]byte{})
 	writer := io.Writer(bytesBuf)
 	exporter.Init(&writer)
+	defer roachtestutil.CloseExporter(ctx, exporter, t, v, bytesBuf, v.Node(1), "")
 
 	reg.GetHandle().Get("baseline").Record(baseline["write"].score)
 	reg.GetHandle().Get("perturbation").Record(perturbation["write"].score)
@@ -712,11 +891,6 @@ func (v variations) writePerfArtifacts(
 		err = tick.Exporter.SnapshotAndWrite(tick.Hist, tick.Now, tick.Elapsed, &tick.Name)
 	})
 	if err != nil {
-		return err
-	}
-
-	node := v.Node(1)
-	if _, err := roachtestutil.CreateStatsFileInClusterFromExporter(ctx, t, c, bytesBuf, exporter, node); err != nil {
 		return err
 	}
 	return nil

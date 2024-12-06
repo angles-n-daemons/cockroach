@@ -64,7 +64,7 @@ func TestStreamerMemoryAccounting(t *testing.T) {
 	}
 
 	monitor := mon.NewMonitor(mon.Options{
-		Name:     "streamer",
+		Name:     mon.MakeMonitorName("streamer"),
 		Settings: cluster.MakeTestingClusterSettings(),
 	})
 	monitor.Start(ctx, nil /* pool */, mon.NewStandaloneBudget(math.MaxInt64))
@@ -80,8 +80,10 @@ func TestStreamerMemoryAccounting(t *testing.T) {
 			panic(err)
 		}
 		leafTxn := kv.NewLeafTxn(ctx, s.DB(), s.DistSQLPlanningNodeID(), leafInputState)
+		metrics := MakeMetrics()
 		s := NewStreamer(
 			s.DistSenderI().(*kvcoord.DistSender),
+			&metrics,
 			s.AppStopper(),
 			leafTxn,
 			func(ctx context.Context, ba *kvpb.BatchRequest) (*kvpb.BatchResponse, error) {

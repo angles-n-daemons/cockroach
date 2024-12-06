@@ -240,6 +240,19 @@ var schemas = []string{
 	)
 	`,
 	`
+	CREATE TABLE json_comp
+	(
+		k UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+		i INT,
+		j1 JSON,
+		j2 JSON,
+		j3 JSON,
+		j4 INT AS ((j1->'foo'->'bar'->'int')::INT) STORED,
+		j5 INT AS ((j1->'foo'->'bar'->'int2')::INT) STORED,
+		j6 STRING AS ((j2->'str')::STRING) STORED
+	)
+	`,
+	`
 		CREATE TABLE single_col_histogram (k TEXT PRIMARY KEY);
 	`,
 	`
@@ -508,6 +521,11 @@ var queries = [...]benchQuery{
 		query:   `INSERT INTO json_table(k, i, j) VALUES (1, 10, '{"a": "foo", "b": "bar", "c": [2, 3, "baz", true, false, null]}')`,
 		args:    []interface{}{},
 		cleanup: "TRUNCATE TABLE json_table",
+	},
+	{
+		name:  "json-comp-insert",
+		query: `INSERT INTO json_comp(i, j1, j2, j3) VALUES ($1, $2, $3, $4)`,
+		args:  []interface{}{10, `'{"foo": {"bar": {"int": 12345, "int2": 1}}, "baz": false}'`, `'{"str": "hello world"}'`, `'{"c": [2, 3, "baz", true, false, null]}'`},
 	},
 	{
 		name: "batch-insert-one",
@@ -1101,19 +1119,23 @@ func BenchmarkEndToEnd(b *testing.B) {
 	srv, db, _ := serverutils.StartServer(b, base.TestServerArgs{UseDatabase: "bench"})
 	defer srv.Stopper().Stop(context.Background())
 	sr := sqlutils.MakeSQLRunner(db)
+	sr.Exec(b, `SET CLUSTER SETTING sql.stats.automatic_collection.enabled = false`)
+	sr.Exec(b, `SET CLUSTER SETTING sql.stats.flush.enabled = false`)
+	sr.Exec(b, `SET CLUSTER SETTING sql.metrics.statement_details.enabled = false`)
 	sr.Exec(b, `CREATE DATABASE bench`)
 	for _, schema := range schemas {
 		sr.Exec(b, schema)
 	}
 
 	for _, query := range queriesToTest(b) {
+		args := trimSingleQuotes(query.args)
 		b.Run(query.name, func(b *testing.B) {
 			for _, vectorize := range []string{"on", "off"} {
 				b.Run("vectorize="+vectorize, func(b *testing.B) {
 					sr.Exec(b, "SET vectorize="+vectorize)
 					b.Run("Simple", func(b *testing.B) {
 						for i := 0; i < b.N; i++ {
-							sr.Exec(b, query.query, query.args...)
+							sr.Exec(b, query.query, args...)
 							if query.cleanup != "" {
 								sr.Exec(b, query.cleanup)
 							}
@@ -1125,7 +1147,7 @@ func BenchmarkEndToEnd(b *testing.B) {
 							b.Fatalf("%v", err)
 						}
 						for i := 0; i < b.N; i++ {
-							res, err := prepared.Exec(query.args...)
+							res, err := prepared.Exec(args...)
 							if err != nil {
 								b.Fatalf("%v", err)
 							}
@@ -1145,6 +1167,18 @@ func BenchmarkEndToEnd(b *testing.B) {
 			}
 		})
 	}
+}
+
+func trimSingleQuotes(args []interface{}) []interface{} {
+	res := make([]interface{}, len(args))
+	for i, arg := range args {
+		if s, ok := arg.(string); ok {
+			res[i] = strings.Trim(s, "'")
+		} else {
+			res[i] = arg
+		}
+	}
+	return res
 }
 
 var slowQueries = [...]benchQuery{

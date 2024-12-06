@@ -114,7 +114,7 @@ func (d *dbConsoleCypressTest) RunTest(ctx context.Context, targetNode int, l *l
 	url := fmt.Sprintf("https://%s", adminUIAddrs[0])
 	require.NoError(d.t, rtCluster.RunE(ctx, option.WithNodes(workloadNode), "mkdir", "-p", d.artifactPath))
 	dockerRun := fmt.Sprintf(
-		`docker run -v %s:/e2e/artifacts %s --config baseUrl=%s,screenshotsFolder=/e2e/artifacts,videosFolder=/e2e/artifacts %s`,
+		`docker run -e NO_COLOR=1 -v %s:/e2e/artifacts %s --config baseUrl=%s,screenshotsFolder=/e2e/artifacts,videosFolder=/e2e/artifacts %s`,
 		d.artifactPath, d.imageName, url, specStr)
 	// If the Docker run fails, get the test failure artifacts and write them to
 	// roachtest's artifact directory.
@@ -123,7 +123,7 @@ func (d *dbConsoleCypressTest) RunTest(ctx context.Context, targetNode int, l *l
 		if mkDirErr := os.MkdirAll(testArtifactsDir, 0777); mkDirErr != nil {
 			d.t.Fatal(mkDirErr)
 		}
-		require.NoError(d.t, rtCluster.Get(ctx, d.t.L(), d.artifactPath, testArtifactsDir, workloadNode))
+		require.NoError(d.t, rtCluster.Get(context.Background(), d.t.L(), d.artifactPath, testArtifactsDir, workloadNode))
 		d.t.Fatal(err)
 	}
 }
@@ -203,7 +203,7 @@ func registerDbConsole(r registry.Registry) {
 		Suites:           registry.Suites(registry.Nightly),
 		Randomized:       false,
 		Run:              runDbConsoleCypressMixedVersions,
-		Timeout:          1 * time.Hour,
+		Timeout:          2 * time.Hour,
 	})
 	r.Add(registry.TestSpec{
 		Name:             "db-console/cypress",
@@ -224,10 +224,10 @@ func runDbConsoleCypress(ctx context.Context, t test.Test, c cluster.Cluster) {
 		t.Fatal("cannot be run in local mode")
 	}
 
-	c.Start(ctx, t.L(), option.DefaultStartOpts(), install.MakeClusterSettings())
+	c.Start(ctx, t.L(), option.DefaultStartOpts(), install.MakeClusterSettings(), c.CRDBNodes())
 
 	cypressTest := newDbConsoleCypressTest(t, c, "cypress/e2e/health-check/*.ts", seedQueries)
-	db, err := c.ConnE(ctx, t.L(), cypressTest.testCluster.WorkloadNode()[0])
+	db, err := c.ConnE(ctx, t.L(), cypressTest.testCluster.CRDBNodes()[0])
 	if err != nil {
 		t.Fatal(err)
 	}

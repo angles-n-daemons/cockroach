@@ -314,7 +314,17 @@ type Replica struct {
 		// depending on which lock is being held.
 		stateLoader stateloader.StateLoader
 		// on-disk storage for sideloaded SSTables. Always non-nil.
+		// TODO(pav-kv): remove, since this is duplicated in logStorage.
 		sideloaded logstore.SideloadStorage
+		// logStorage provides access to the raft log storage. Set once upon Replica
+		// creation, and is never nil.
+		//
+		// TODO(pav-kv): move log state (such as shMu.lastIndexNotDurable) into the
+		// log storage type. Make the log storage type observe the writes and
+		// maintain this state, as opposed to doing it from a few places in Replica
+		// (like handleRaftReady).
+		logStorage *logstore.LogStore
+
 		// stateMachine is used to apply committed raft entries.
 		stateMachine replicaStateMachine
 		// decoder is used to decode committed raft entries.
@@ -441,7 +451,13 @@ type Replica struct {
 	// TODO(pav-kv): audit all other fields and include here.
 	shMu struct {
 		// The state of the Raft state machine.
+		// Invariant: state.TruncatedState == nil. The field is being phased out in
+		// favour of raftTruncState below.
 		state kvserverpb.ReplicaState
+		// raftTruncState contains the raft log truncation state, i.e. the ID of the
+		// last entry of the log prefix that has been compacted out from the raft
+		// log storage.
+		raftTruncState kvserverpb.RaftTruncatedState
 		// Last index/term written to the raft log (not necessarily durable locally
 		// or committed by the group). Note that lastTermNotDurable may be 0 (and
 		// thus invalid) even when lastIndexNotDurable is known, in which case the
@@ -998,6 +1014,12 @@ func (r *Replica) ReplicaID() roachpb.ReplicaID {
 // ID returns the FullReplicaID for the Replica.
 func (r *Replica) ID() storage.FullReplicaID {
 	return storage.FullReplicaID{RangeID: r.RangeID, ReplicaID: r.replicaID}
+}
+
+// LogStorageRaftMuLocked returns the Replica's log storage.
+// raftMu must be held when using the returned object.
+func (r *Replica) LogStorageRaftMuLocked() *logstore.LogStore {
+	return r.raftMu.logStorage
 }
 
 // cleanupFailedProposal cleans up after a proposal that has failed. It
@@ -1731,6 +1753,15 @@ func (r *Replica) State(ctx context.Context) kvserverpb.RangeInfo {
 func (r *Replica) assertStateRaftMuLockedReplicaMuRLocked(
 	ctx context.Context, reader storage.Reader,
 ) {
+	if ts := r.shMu.state.TruncatedState; ts != nil {
+		log.Fatalf(ctx, "non-empty RaftTruncatedState in ReplicaState: %+v", ts)
+	} else if loaded, err := r.mu.stateLoader.LoadRaftTruncatedState(ctx, reader); err != nil {
+		log.Fatalf(ctx, "%s", err)
+	} else if ts := r.shMu.raftTruncState; loaded != ts {
+		log.Fatalf(ctx, "on-disk and in-memory RaftTruncatedState diverged: %s",
+			redact.Safe(pretty.Diff(loaded, ts)))
+	}
+
 	diskState, err := r.mu.stateLoader.Load(ctx, reader, r.shMu.state.Desc)
 	if err != nil {
 		log.Fatalf(ctx, "%v", err)

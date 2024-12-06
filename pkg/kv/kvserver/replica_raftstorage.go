@@ -342,10 +342,16 @@ func snapshot(
 		return OutgoingSnapshot{}, errors.Mark(errors.Errorf("couldn't find range descriptor"), errMarkSnapshotError)
 	}
 
+	// TODO(sep-raft-log): do not load the state that is not useful for sending
+	// snapshots, e.g. Lease, GCThreshold, etc. Only applied indices and the
+	// descriptor are used, everything else is included in the snapshot data.
 	state, err := rsl.Load(ctx, snap, &desc)
 	if err != nil {
 		return OutgoingSnapshot{}, err
 	}
+	// There is no need in sending TruncatedState because the receiver assigns it
+	// to match snap.RaftSnap.Metadata.{Index,Term}. See (*Replica).applySnapshot.
+	state.TruncatedState = nil
 
 	return OutgoingSnapshot{
 		EngineSnap: snap,
@@ -653,9 +659,14 @@ func (r *Replica) applySnapshot(
 	// has not yet been updated. Any errors past this point must therefore be
 	// treated as fatal.
 
-	state, err := stateloader.Make(desc.RangeID).Load(ctx, r.store.TODOEngine(), desc)
+	sl := stateloader.Make(desc.RangeID)
+	state, err := sl.Load(ctx, r.store.TODOEngine(), desc)
 	if err != nil {
 		log.Fatalf(ctx, "unable to load replica state: %s", err)
+	}
+	truncState, err := sl.LoadRaftTruncatedState(ctx, r.store.TODOEngine())
+	if err != nil {
+		log.Fatalf(ctx, "unable to load raft truncated state: %s", err)
 	}
 
 	if uint64(state.RaftAppliedIndex) != nonemptySnap.Metadata.Index {
@@ -727,14 +738,26 @@ func (r *Replica) applySnapshot(
 	// performance implications are not likely to be drastic. If our
 	// feelings about this ever change, we can add a LastIndex field to
 	// raftpb.SnapshotMetadata.
-	r.shMu.lastIndexNotDurable = state.RaftAppliedIndex
-
-	// TODO(sumeer): We should be able to set this to
+	// TODO(pav-kv): the above comment seems stale, and needs an update.
+	//
+	// TODO(sumeer): We should be able to set the last term to
 	// nonemptySnap.Metadata.Term. See
 	// https://github.com/cockroachdb/cockroach/pull/75675#pullrequestreview-867926687
 	// for a discussion regarding this.
-	r.shMu.lastTermNotDurable = invalidLastTerm
-	r.shMu.raftLogSize = 0
+	r.asLogStorage().updateStateRaftMuLockedMuLocked(logstore.RaftState{
+		LastIndex: state.RaftAppliedIndex,
+		LastTerm:  invalidLastTerm,
+		ByteSize:  0, // the log is empty now
+	})
+	r.shMu.raftTruncState = truncState
+	// Snapshots typically have fewer log entries than the leaseholder. The next
+	// time we hold the lease, recompute the log size before making decisions.
+	//
+	// TODO(pav-kv): does this assume that snapshots can contain log entries,
+	// which is no longer true? The comment needs an update, and the decision to
+	// set this flag to false revisited.
+	r.shMu.raftLogSizeTrusted = false
+
 	// Update the store stats for the data in the snapshot.
 	r.store.metrics.subtractMVCCStats(ctx, r.tenantMetricsRef, *r.shMu.state.Stats)
 	r.store.metrics.addMVCCStats(ctx, r.tenantMetricsRef, *state.Stats)
@@ -744,9 +767,9 @@ func (r *Replica) applySnapshot(
 	// by r.leasePostApply, but we called those above, so now it's safe to
 	// wholesale replace r.mu.state.
 	r.shMu.state = state
-	// Snapshots typically have fewer log entries than the leaseholder. The next
-	// time we hold the lease, recompute the log size before making decisions.
-	r.shMu.raftLogSizeTrusted = false
+	if r.shMu.state.ForceFlushIndex != (roachpb.ForceFlushIndex{}) {
+		r.flowControlV2.ForceFlushIndexChangedLocked(ctx, r.shMu.state.ForceFlushIndex.Index)
+	}
 
 	// Invoke the leasePostApply method to ensure we properly initialize the
 	// replica according to whether it holds the lease. We allow jumps in the

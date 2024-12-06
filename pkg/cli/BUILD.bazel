@@ -182,6 +182,7 @@ go_library(
         "//pkg/storage",
         "//pkg/storage/enginepb",
         "//pkg/storage/fs",
+        "//pkg/testutils",
         "//pkg/testutils/bazelcodecover",
         "//pkg/testutils/serverutils",
         "//pkg/ts",
@@ -379,9 +380,9 @@ go_test(
     }),
     shard_count = 16,
     deps = [
+        "//pkg/backup",
         "//pkg/base",
         "//pkg/build",
-        "//pkg/ccl/backupccl",
         "//pkg/cli/clicfg",
         "//pkg/cli/clienturl",
         "//pkg/cli/clierror",

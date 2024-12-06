@@ -208,12 +208,6 @@ Version
 Channel
 VirtualClusterName
 
-# The validity of the rows in this table are tested elsewhere; we merely assert the columns.
-query ITTTTTTTTTTTRTTIITTITT colnames
-SELECT * FROM crdb_internal.jobs WHERE false
-----
-job_id  job_type  description  statement  user_name  descriptor_ids  status  running_status  created  started  finished  modified  fraction_completed  high_water_timestamp  error  coordinator_id  trace_id  last_run  next_run  num_runs  execution_errors  execution_events
-
 query IITTITTT colnames
 SELECT * FROM crdb_internal.schema_changes WHERE table_id < 0
 ----
@@ -364,12 +358,12 @@ txn_id  txn_fingerprint_id  query  implicit_txn  session_id  start_time  end_tim
 query ITTI
 SELECT range_id, start_pretty, end_pretty, lease_holder FROM crdb_internal.ranges
 ----
-70  /Tenant/10  /Tenant/11  1
+74  /Tenant/10  /Tenant/11  1
 
 query ITT
 SELECT range_id, start_pretty, end_pretty FROM crdb_internal.ranges_no_leases
 ----
-70  /Tenant/10  /Tenant/11
+74  /Tenant/10  /Tenant/11
 
 query IT
 SELECT zone_id, target FROM crdb_internal.zones ORDER BY 1
@@ -413,7 +407,7 @@ select crdb_internal.get_vmodule()
 query T
 SELECT crdb_internal.release_series(crdb_internal.node_executable_version())
 ----
-24.3
+25.1
 
 query ITTT colnames,rowsort
 select node_id, component, field, regexp_replace(regexp_replace(value, '^\d+$', '<port>'), e':\\d+', ':<port>') as value from crdb_internal.node_runtime_info
@@ -501,7 +495,7 @@ select * from crdb_internal.gossip_alerts
 query T
 SELECT crdb_internal.release_series(crdb_internal.node_executable_version())
 ----
-24.3
+25.1
 
 user root
 

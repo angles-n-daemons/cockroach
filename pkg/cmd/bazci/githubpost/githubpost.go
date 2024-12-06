@@ -68,12 +68,21 @@ func DefaultFormatter(ctx context.Context, f Failure) (issues.IssueFormatter, is
 	}
 	if len(teams) > 0 {
 		projColID = teams[0].TriageColumnID
-		for _, team := range teams {
-			if !team.SilenceMentions {
-				mentions = append(mentions, "@"+string(team.Name()))
+		for _, tm := range teams {
+			if !tm.SilenceMentions {
+				var hasAliases bool
+				for al, purp := range tm.Aliases {
+					if purp == team.PurposeUnittest {
+						hasAliases = true
+						mentions = append(mentions, "@"+strings.TrimSpace(string(al)))
+					}
+				}
+				if !hasAliases {
+					mentions = append(mentions, "@"+string(tm.Name()))
+				}
 			}
-			if team.Label != "" {
-				labels = append(labels, team.Label)
+			if tm.Label != "" {
+				labels = append(labels, tm.Label)
 			}
 		}
 	}
@@ -687,7 +696,7 @@ func getOwner(ctx context.Context, packageName, testName string) (_teams []team.
 		}
 
 		// Workaround for #107885.
-		if strings.Contains(packageName, "backupccl") {
+		if strings.Contains(packageName, "backup") {
 			dr := co.GetTeamForAlias("cockroachdb/disaster-recovery")
 			if dr.Name() == "" {
 				log.Fatalf("disaster-recovery team could not be found in TEAMS.yaml")

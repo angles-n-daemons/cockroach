@@ -505,10 +505,11 @@ func NewServer(cfg *ExecutorConfig, pool *mon.BytesMonitor) *Server {
 func makeMetrics(internal bool) Metrics {
 	return Metrics{
 		EngineMetrics: EngineMetrics{
-			DistSQLSelectCount:    metric.NewCounter(getMetricMeta(MetaDistSQLSelect, internal)),
-			SQLOptFallbackCount:   metric.NewCounter(getMetricMeta(MetaSQLOptFallback, internal)),
-			SQLOptPlanCacheHits:   metric.NewCounter(getMetricMeta(MetaSQLOptPlanCacheHits, internal)),
-			SQLOptPlanCacheMisses: metric.NewCounter(getMetricMeta(MetaSQLOptPlanCacheMisses, internal)),
+			DistSQLSelectCount:            metric.NewCounter(getMetricMeta(MetaDistSQLSelect, internal)),
+			DistSQLSelectDistributedCount: metric.NewCounter(getMetricMeta(MetaDistSQLSelectDistributed, internal)),
+			SQLOptFallbackCount:           metric.NewCounter(getMetricMeta(MetaSQLOptFallback, internal)),
+			SQLOptPlanCacheHits:           metric.NewCounter(getMetricMeta(MetaSQLOptPlanCacheHits, internal)),
+			SQLOptPlanCacheMisses:         metric.NewCounter(getMetricMeta(MetaSQLOptPlanCacheMisses, internal)),
 			// TODO(mrtracy): See HistogramWindowInterval in server/config.go for the 6x factor.
 			DistSQLExecLatency: metric.NewHistogram(metric.HistogramOptions{
 				Mode:         metric.HistogramModePreferHdrLatency,
@@ -1029,19 +1030,19 @@ func (s *Server) newConnExecutor(
 	// Create the various monitors.
 	// The session monitors are started in activate().
 	sessionRootMon := mon.NewMonitor(mon.Options{
-		Name:     "session root",
+		Name:     mon.MakeMonitorName("session root"),
 		CurCount: memMetrics.CurBytesCount,
 		MaxHist:  memMetrics.MaxBytesHist,
 		Settings: s.cfg.Settings,
 	})
 	sessionMon := mon.NewMonitor(mon.Options{
-		Name:     "session",
+		Name:     mon.MakeMonitorName("session"),
 		CurCount: memMetrics.SessionCurBytesCount,
 		MaxHist:  memMetrics.SessionMaxBytesHist,
 		Settings: s.cfg.Settings,
 	})
 	sessionPreparedMon := mon.NewMonitor(mon.Options{
-		Name:      "session prepared statements",
+		Name:      mon.MakeMonitorName("session prepared statements"),
 		CurCount:  memMetrics.SessionPreparedCurBytesCount,
 		MaxHist:   memMetrics.SessionPreparedMaxBytesHist,
 		Increment: 1024,
@@ -1049,7 +1050,7 @@ func (s *Server) newConnExecutor(
 	})
 	// The txn monitor is started in txnState.resetForNewSQLTxn().
 	txnMon := mon.NewMonitor(mon.Options{
-		Name:     "txn",
+		Name:     mon.MakeMonitorName("txn"),
 		CurCount: memMetrics.TxnCurBytesCount,
 		MaxHist:  memMetrics.TxnMaxBytesHist,
 		Settings: s.cfg.Settings,
@@ -2417,6 +2418,14 @@ func (ex *connExecutor) execCmd() (retErr error) {
 					Types:     portal.Stmt.Types,
 				},
 				Values: portal.Qargs,
+			}
+
+			if tcmd.Limit != 0 && tree.ReturnsAtMostOneRow(portal.Stmt.AST) {
+				// When a statement returns at most one row, the result row
+				// limit doesn't matter. We set it to 0 to fetch all rows, which
+				// allows us to clean up resources sooner if using a pausable
+				// portal.
+				tcmd.Limit = 0
 			}
 
 			// If this is the first-time execution of a portal without a limit set,
@@ -4068,6 +4077,8 @@ func (ex *connExecutor) waitForTxnJobs() error {
 	if len(ex.extraTxnState.jobs.created) == 0 {
 		return nil
 	}
+	ex.mu.IdleInSessionTimeout.Stop()
+	defer ex.startIdleInSessionTimeout()
 	ex.server.cfg.JobRegistry.NotifyToResume(
 		ex.ctxHolder.connCtx, ex.extraTxnState.jobs.created...,
 	)

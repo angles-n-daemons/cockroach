@@ -14,14 +14,14 @@ import (
 )
 
 const (
-	replStatsRotateInterval = 5 * time.Minute
+	replStatsRotateInterval = 10 * time.Second
 	decayFactor             = 0.8
 
 	// MinStatsDuration defines a lower bound on how long users of replica stats
 	// should wait before using those stats for anything. If the duration of a
 	// measurement has been less than MinStatsDuration, these methods could easily
 	// return outlier/anomalous data.
-	MinStatsDuration = 5 * time.Second
+	MinStatsDuration = time.Second
 )
 
 // AddSSTableRequestSizeFactor wraps

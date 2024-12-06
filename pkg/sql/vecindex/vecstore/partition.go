@@ -7,6 +7,7 @@ package vecstore
 
 import (
 	"context"
+	"slices"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/vecindex/internal"
 	"github.com/cockroachdb/cockroach/pkg/sql/vecindex/quantize"
@@ -38,6 +39,9 @@ const (
 	InvalidLevel Level = 0
 	// LeafLevel is the well-known identifier for the K-means leaf level.
 	LeafLevel Level = 1
+	// SecondLevel is the well-known identifier for the level above the leaf
+	// level.
+	SecondLevel Level = 2
 )
 
 // Partition contains a set of quantized vectors that are clustered around a
@@ -63,6 +67,17 @@ func NewPartition(
 		quantizedSet: quantizedSet,
 		childKeys:    childKeys,
 		level:        level,
+	}
+}
+
+// Clone makes a deep copy of this partition. Changes to the original or clone
+// do not affect the other.
+func (p *Partition) Clone() *Partition {
+	return &Partition{
+		quantizer:    p.quantizer,
+		quantizedSet: p.quantizedSet.Clone(),
+		childKeys:    slices.Clone(p.childKeys),
+		level:        p.level,
 	}
 }
 
@@ -135,17 +150,20 @@ func (p *Partition) Search(
 	return p.level, count
 }
 
-// Add quantizes the given vector as part of this partition. It returns false if
-// the vector is already in the partition.
+// Add quantizes the given vector as part of this partition. If a vector with
+// the same key is already in the partition, update its value and return false.
 func (p *Partition) Add(ctx context.Context, vector vector.T, childKey ChildKey) bool {
-	if p.Find(childKey) != -1 {
-		return false
+	offset := p.Find(childKey)
+	if offset != -1 {
+		// Remove the vector from the partition and re-add it below.
+		p.ReplaceWithLast(offset)
 	}
 
 	vectorSet := vector.AsSet()
 	p.quantizer.QuantizeInSet(ctx, p.quantizedSet, &vectorSet)
 	p.childKeys = append(p.childKeys, childKey)
-	return true
+
+	return offset == -1
 }
 
 // ReplaceWithLast removes the quantized vector at the given offset from the
