@@ -5,9 +5,6 @@ import * as protos from "src/js/protos";
 import { hotRangesSelector, isValidSelector } from "oss/src/redux/hotRanges";
 import { cockroach } from "src/js/protos";
 import { refreshHotRanges } from "src/redux/apiReducers";
-import {
-  util,
-} from "@cockroachlabs/cluster-ui";
 
 
 import {
@@ -108,13 +105,13 @@ async function getMiscData(): Promise<cell[]> {
       name: "cr.node.sys.runnable.goroutines.per.cpu",
       downsampler: TSAggregator.MAX,
       aggregator: TSAggregator.MAX,
-      derivative: TSDerivative.NON_NEGATIVE_DERIVATIVE,
+      derivative: TSDerivative.NONE,
     },
     {
       name: "cr.node.sys.runnable.goroutines.per.cpu",
       downsampler: TSAggregator.AVG,
       aggregator: TSAggregator.AVG,
-      derivative: TSDerivative.NON_NEGATIVE_DERIVATIVE,
+      derivative: TSDerivative.NONE,
     },
   ];
   const data = await queryTimeSeries(
@@ -129,13 +126,13 @@ async function getMiscData(): Promise<cell[]> {
     let identifier = '';
     switch (result.query.name) {
       case "cr.node.sql.crud_query.count":
-        identifier = "Cluster QPS";
-        break;
+        identifier = "Cluster QPS"; break;
       case "kv.concurrency.avg_lock_wait_duration_nanos":
-        identifier = "Lock Wait"; break; case "kv.concurrency.latch_conflict_wait_durations": identifier = "Latch Wait"; break;
+        identifier = "Lock Wait"; break;
+      case "kv.concurrency.latch_conflict_wait_durations":
+        identifier = "Latch Wait"; break;
       case "cr.node.sys.runnable.goroutines.per.cpu":
-        identifier = "Runnable Goroutines per CPU";
-        break;
+        identifier = "Runnable Goroutines per CPU"; break;
       default:
         throw new Error('i dont know this type ' + result.query.name);
     }
@@ -170,7 +167,7 @@ async function getNodeDatapoints(nodeIDs: number[]): Promise<Datapoint[]> {
       sources.map(id => ({
         name: "cr.node.sys.host.disk.write.bytes",
         downsampler: TSAggregator.AVG,
-        derivative: TSDerivative.NONE,
+        derivative: TSDerivative.NON_NEGATIVE_DERIVATIVE,
         sources: [id],
       })),
     );
@@ -228,13 +225,8 @@ function collectResults(nodes: Datapoint[], nodeRanges: Datapoint[], allRanges: 
       ]) {
         const identifier = datasetID as string + aggregator + metric;
         const numbers = (dataset as Datapoint[]).map((range: any) => range[metricKey]);
-        const valueNum = (aggFn as any)(numbers);
         let value = "";
-        if (datasetID !== "N" && metric === "C") {
-          value = util.Duration(valueNum)
-        } else {
-          value = (aggFn as any)(numbers).toFixed(3);
-        }
+        value = (aggFn as any)(numbers).toFixed(3);
         results.push({ identifier, value });
       }
     }
