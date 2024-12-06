@@ -42,6 +42,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgnotice"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/row"
+	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scerrors"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/catconstants"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/catid"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/eval"
@@ -90,7 +91,16 @@ func (p *planner) getNonTemporarySchemaForCreate(
 	case catalog.SchemaPublic:
 		return sc, nil
 	case catalog.SchemaUserDefined:
-		return p.Descriptors().MutableByID(p.txn).Schema(ctx, sc.GetID())
+		sc, err := p.Descriptors().MutableByID(p.txn).Schema(ctx, sc.GetID())
+		if err != nil {
+			return nil, err
+		}
+		// Exit early with an error if the schema is undergoing any legacy
+		// or declarative schema change.
+		if sc.HasConcurrentSchemaChanges() {
+			return nil, scerrors.ConcurrentSchemaChangeError(sc)
+		}
+		return sc, nil
 	case catalog.SchemaVirtual:
 		return nil, pgerror.Newf(pgcode.InsufficientPrivilege, "schema cannot be modified: %q", scName)
 	default:
@@ -373,6 +383,13 @@ func (n *createTableNode) startExec(params runParams) error {
 		return err
 	}
 	if n.n.As() {
+		params.p.BufferClientNotice(
+			params.ctx,
+			pgnotice.Newf("CREATE TABLE ... AS does not copy over "+
+				"indexes, default expressions, or constraints; the new table "+
+				"has a hidden rowid primary key column"),
+		)
+
 		asCols := planColumns(n.sourcePlan)
 		if !n.n.AsHasUserSpecifiedPrimaryKey() {
 			// rowID column is already present in the input as the last column
@@ -1359,6 +1376,7 @@ func NewTableDesc(
 	evalCtx *eval.Context,
 	sessionData *sessiondata.SessionData,
 	persistence tree.Persistence,
+	colToSequenceRefs map[tree.Name]*tabledesc.Mutable,
 	inOpts ...NewTableDescOption,
 ) (*tabledesc.Mutable, error) {
 
@@ -1653,6 +1671,14 @@ func NewTableDesc(
 			}
 			col := cdd[i].ColumnDescriptor
 			idx := cdd[i].PrimaryKeyOrUniqueIndexDescriptor
+
+			// If necessary add any sequence references for this column, which is
+			// only needed for SERIAL / IDENTITY columns on create.
+			if colToSequenceRefs != nil {
+				if seqDesc := colToSequenceRefs[d.Name]; seqDesc != nil {
+					col.UsesSequenceIds = append(col.UsesSequenceIds, seqDesc.GetID())
+				}
+			}
 
 			// Do not include virtual tables in these statistics.
 			if !descpb.IsVirtualTable(id) {
@@ -2422,6 +2448,7 @@ func newTableDesc(
 			params.EvalContext(),
 			params.SessionData(),
 			n.Persistence,
+			colNameToOwnedSeq,
 		)
 	})
 	if err != nil {

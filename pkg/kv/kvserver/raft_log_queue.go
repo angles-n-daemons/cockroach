@@ -682,26 +682,11 @@ func (rlq *raftLogQueue) process(
 
 	if _, recompute, _ := rlq.shouldQueueImpl(ctx, decision); recompute {
 		log.VEventf(ctx, 2, "recomputing raft log based on decision %+v", decision)
-
-		// We need to hold raftMu both to access the sideloaded storage and to
-		// make sure concurrent Raft activity doesn't foul up our update to the
-		// cached in-memory values.
-		r.raftMu.Lock()
-		n, err := ComputeRaftLogSize(ctx, r.RangeID, r.store.TODOEngine(), r.raftMu.sideloaded)
-		if err == nil {
-			r.mu.Lock()
-			r.shMu.raftLogSize = n
-			r.shMu.raftLogLastCheckSize = n
-			r.shMu.raftLogSizeTrusted = true
-			r.mu.Unlock()
-		}
-		r.raftMu.Unlock()
-
-		if err != nil {
+		if size, err := r.asLogStorage().updateLogSize(ctx); err != nil {
 			return false, errors.Wrap(err, "recomputing raft log size")
+		} else {
+			log.VEventf(ctx, 2, "recomputed raft log size to %s", humanizeutil.IBytes(size))
 		}
-
-		log.VEventf(ctx, 2, "recomputed raft log size to %s", humanizeutil.IBytes(n))
 
 		// Override the decision, now that an accurate log size is available.
 		decision, err = newTruncateDecision(ctx, r)
@@ -723,11 +708,11 @@ func (rlq *raftLogQueue) process(
 	}
 	b := &kv.Batch{}
 	truncRequest := &kvpb.TruncateLogRequest{
-		RequestHeader: kvpb.RequestHeader{Key: r.Desc().StartKey.AsRawKey()},
-		Index:         decision.NewFirstIndex,
-		RangeID:       r.RangeID,
+		RequestHeader:      kvpb.RequestHeader{Key: r.Desc().StartKey.AsRawKey()},
+		Index:              decision.NewFirstIndex,
+		RangeID:            r.RangeID,
+		ExpectedFirstIndex: decision.Input.FirstIndex,
 	}
-	truncRequest.ExpectedFirstIndex = decision.Input.FirstIndex
 	b.AddRawRequest(truncRequest)
 	if err := rlq.db.Run(ctx, b); err != nil {
 		return false, err

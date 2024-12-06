@@ -25,6 +25,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/catid"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/volatility"
+	"github.com/cockroachdb/cockroach/pkg/sql/sessiondatapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlerrors"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
@@ -83,7 +84,8 @@ func alterTableAlterColumnType(
 	var err error
 	newColType.Type, err = schemachange.ValidateAlterColumnTypeChecks(
 		b, t, b.ClusterSettings(), newColType.Type,
-		col.GeneratedAsIdentityType != catpb.GeneratedAsIdentityType_NOT_IDENTITY_COLUMN)
+		col.GeneratedAsIdentityType != catpb.GeneratedAsIdentityType_NOT_IDENTITY_COLUMN,
+		newColType.IsVirtual)
 	if err != nil {
 		panic(err)
 	}
@@ -92,7 +94,8 @@ func alterTableAlterColumnType(
 	validateAutomaticCastForNewType(b, tbl.TableID, colID, t.Column.String(),
 		oldColType.Type, newColType.Type, t.Using != nil)
 
-	kind, err := schemachange.ClassifyConversionFromTree(b, t, oldColType.Type, newColType.Type)
+	kind, err := schemachange.ClassifyConversionFromTree(b, t, oldColType.Type, newColType.Type,
+		newColType.IsVirtual)
 	if err != nil {
 		panic(err)
 	}
@@ -105,8 +108,7 @@ func alterTableAlterColumnType(
 	case schemachange.ColumnConversionGeneral:
 		handleGeneralColumnConversion(b, stmt, t, tn, tbl, col, oldColType, &newColType)
 	default:
-		panic(scerrors.NotImplementedErrorf(t,
-			"alter type conversion %v not handled", kind))
+		panic(errors.AssertionFailedf("alter type conversion %v not handled", kind))
 	}
 }
 
@@ -145,7 +147,7 @@ func validateAutomaticCastForNewType(
 	// We have a USING clause, but if we have DEFAULT or ON UPDATE expressions,
 	// then we raise an error because those expressions cannot be automatically
 	// cast to the new type.
-	columnElements(b, tableID, colID).ForEach(func(
+	columnElements(b, tableID, colID).Filter(publicTargetFilter).ForEach(func(
 		_ scpb.Status, _ scpb.TargetStatus, e scpb.Element,
 	) {
 		var exprType string
@@ -263,7 +265,17 @@ func handleGeneralColumnConversion(
 	col *scpb.Column,
 	oldColType, newColType *scpb.ColumnType,
 ) {
+	failIfExplicitTransaction(b)
 	failIfExperimentalSettingNotSet(b, oldColType, newColType)
+	failIfSafeUpdates(b)
+
+	// TODO(#47137): Only support alter statements that only have a single command.
+	switch s := stmt.(type) {
+	case *tree.AlterTable:
+		if len(s.Cmds) > 1 {
+			panic(sqlerrors.NewAlterColTypeInCombinationNotSupportedError())
+		}
+	}
 
 	// To handle the conversion, we remove the old column and add a new one with
 	// the correct type. The new column will temporarily have a computed expression
@@ -285,27 +297,19 @@ func handleGeneralColumnConversion(
 		}
 	})
 
+	// This code path should never be reached for virtual columns, as their values
+	// are always computed dynamically on access and are never stored on disk.
 	if oldColType.IsVirtual {
-		// TODO(#125840): we currently don't support altering the type of a virtual column
-		panic(scerrors.NotImplementedErrorf(t,
-			"backfilling during ALTER COLUMN TYPE for a virtual column is not supported"))
+		panic(errors.AssertionFailedf("virtual columns cannot be backfilled"))
 	}
 
 	// We block any attempt to alter the type of a column that is a key column in
 	// the primary key. We can't use walkColumnDependencies here, as it doesn't
 	// differentiate between key columns and stored columns.
-	pk := mustRetrievePrimaryIndex(b, tbl.TableID)
+	pk := getLatestPrimaryIndex(b, tbl.TableID)
 	for _, keyCol := range getIndexColumns(b.QueryByID(tbl.TableID), pk.IndexID, scpb.IndexColumn_KEY) {
 		if keyCol.ColumnID == col.ColumnID {
 			panic(sqlerrors.NewAlterColumnTypeColInIndexNotSupportedErr())
-		}
-	}
-
-	// TODO(#47137): Only support alter statements that only have a single command.
-	switch s := stmt.(type) {
-	case *tree.AlterTable:
-		if len(s.Cmds) > 1 {
-			panic(sqlerrors.NewAlterColTypeInCombinationNotSupportedError())
 		}
 	}
 
@@ -313,8 +317,7 @@ func handleGeneralColumnConversion(
 	// general path works. Without these rules, we encounter failures during the
 	// ALTER operation. To avoid this, we revert to legacy handling if not running
 	// on version 25.1.
-	// TODO(25.1): Update V24_3 here once V25_1 is defined.
-	if !b.EvalCtx().Settings.Version.ActiveVersion(b).IsActive(clusterversion.V24_3) {
+	if !b.EvalCtx().Settings.Version.ActiveVersion(b).IsActive(clusterversion.V25_1) {
 		panic(scerrors.NotImplementedErrorf(t,
 			"old active version; ALTER COLUMN TYPE requires backfill. Reverting to legacy handling"))
 	}
@@ -428,10 +431,20 @@ func updateColumnType(b BuildCtx, oldColType, newColType *scpb.ColumnType) {
 	b.Add(newColType)
 }
 
-// failIfExperimentalSettingNotSet checks if the setting that allows altering
-// types is enabled. If the setting is not enabled, this function will panic.
+// failIfExplicitTransaction blocks the operation if it's part of an explicit
+// transaction, unless the schema changer mode is set to 'unsafe_always'.
+func failIfExplicitTransaction(b BuildCtx) {
+	if !b.EvalCtx().TxnIsSingleStmt &&
+		b.SessionData().NewSchemaChangerMode != sessiondatapb.UseNewSchemaChangerUnsafeAlways {
+		panic(sqlerrors.NewAlterColTypeInTxnNotSupportedErr())
+	}
+}
+
+// failIfExperimentalSettingNotSet checks if the current version requires a
+// setting to be enabled to perform an ALTER COLUMN TYPE operation.
 func failIfExperimentalSettingNotSet(b BuildCtx, oldColType, newColType *scpb.ColumnType) {
-	if !b.SessionData().AlterColumnTypeGeneralEnabled {
+	if !b.SessionData().AlterColumnTypeGeneralEnabled &&
+		!b.EvalCtx().Settings.Version.ActiveVersion(b).IsActive(clusterversion.V25_1) {
 		panic(pgerror.WithCandidateCode(
 			errors.WithHint(
 				errors.WithIssueLink(
@@ -442,6 +455,24 @@ func failIfExperimentalSettingNotSet(b BuildCtx, oldColType, newColType *scpb.Co
 				"you can enable alter column type general support by running "+
 					"`SET enable_experimental_alter_column_type_general = true`"),
 			pgcode.ExperimentalFeature))
+	}
+}
+
+// failIfSafeUpdates checks if the sql_safe_updates is present, and if so, it
+// will fail the operation.
+func failIfSafeUpdates(b BuildCtx) {
+	if b.SessionData().SafeUpdates {
+		panic(
+			pgerror.WithCandidateCode(
+				errors.WithMessage(
+					errors.New(
+						"ALTER COLUMN TYPE requiring data rewrite may result in data loss "+
+							"for certain type conversions or when applying a USING clause"),
+					"rejected (sql_safe_updates = true)",
+				),
+				pgcode.Warning,
+			),
+		)
 	}
 }
 

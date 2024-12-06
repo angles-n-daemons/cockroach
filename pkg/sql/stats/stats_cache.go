@@ -225,19 +225,6 @@ func (sc *TableStatisticsCache) GetTableStats(
 	if !statsUsageAllowed(table, sc.settings) {
 		return nil, nil
 	}
-	defer func() {
-		if r := recover(); r != nil {
-			// In the event of a "safe" panic, we only want to log the error and
-			// continue executing the query without stats for this table.
-			if ok, e := errorutil.ShouldCatch(r); ok {
-				err = e
-			} else {
-				// Other panic objects can't be considered "safe" and thus are
-				// propagated as crashes that terminate the session.
-				panic(r)
-			}
-		}
-	}()
 	forecast := forecastAllowed(table, sc.settings)
 	return sc.getTableStatsFromCache(
 		ctx, table.GetID(), &forecast, table.UserDefinedTypeColumns(),
@@ -639,9 +626,24 @@ func NewTableStatisticProto(datums tree.Datums) (*TableStatisticProto, error) {
 // need to run a query to get user defined type metadata.
 func (sc *TableStatisticsCache) parseStats(
 	ctx context.Context, datums tree.Datums,
-) (*TableStatistic, *types.T, error) {
+) (_ *TableStatistic, _ *types.T, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			// In the event of a "safe" panic, we only want to log the error and
+			// continue executing the query without stats for this table. This is only
+			// possible because the code does not update shared state and does not
+			// manipulate locks.
+			if ok, e := errorutil.ShouldCatch(r); ok {
+				err = e
+			} else {
+				// Other panic objects can't be considered "safe" and thus are
+				// propagated as crashes that terminate the session.
+				panic(r)
+			}
+		}
+	}()
+
 	var tsp *TableStatisticProto
-	var err error
 	tsp, err = NewTableStatisticProto(datums)
 	if err != nil {
 		return nil, nil, err
@@ -686,7 +688,6 @@ func (sc *TableStatisticsCache) parseStats(
 // the resulting buckets into tabStat.Histogram.
 func DecodeHistogramBuckets(tabStat *TableStatistic) error {
 	h := tabStat.HistogramData
-	var offset int
 	if tabStat.NullCount > 0 {
 		// A bucket for NULL is not persisted, but we create a fake one to
 		// make histograms easier to work with. The length of res.Histogram
@@ -694,33 +695,35 @@ func DecodeHistogramBuckets(tabStat *TableStatistic) error {
 		// buckets.
 		// TODO(michae2): Combine this with setHistogramBuckets, especially if we
 		// need to change both after #6224 is fixed (NULLS LAST in index ordering).
-		tabStat.Histogram = make([]cat.HistogramBucket, len(h.Buckets)+1)
+		tabStat.Histogram = make([]cat.HistogramBucket, 1, len(h.Buckets)+1)
 		tabStat.Histogram[0] = cat.HistogramBucket{
 			NumEq:         float64(tabStat.NullCount),
 			NumRange:      0,
 			DistinctRange: 0,
 			UpperBound:    tree.DNull,
 		}
-		offset = 1
 	} else {
-		tabStat.Histogram = make([]cat.HistogramBucket, len(h.Buckets))
-		offset = 0
+		tabStat.Histogram = make([]cat.HistogramBucket, 0, len(h.Buckets))
 	}
 
 	// Decode the histogram data so that it's usable by the opt catalog.
 	var a tree.DatumAlloc
-	for i := offset; i < len(tabStat.Histogram); i++ {
-		bucket := &h.Buckets[i-offset]
+	for i := range h.Buckets {
+		bucket := &h.Buckets[i]
 		datum, err := DecodeUpperBound(h.Version, h.ColumnType, &a, bucket.UpperBound)
 		if err != nil {
+			if h.ColumnType.Family() == types.EnumFamily && errors.Is(err, types.EnumValueNotFound) {
+				// Skip over buckets for enum values that were dropped.
+				continue
+			}
 			return err
 		}
-		tabStat.Histogram[i] = cat.HistogramBucket{
+		tabStat.Histogram = append(tabStat.Histogram, cat.HistogramBucket{
 			NumEq:         float64(bucket.NumEq),
 			NumRange:      float64(bucket.NumRange),
 			DistinctRange: bucket.DistinctRange,
 			UpperBound:    datum,
-		}
+		})
 	}
 	return nil
 }
@@ -789,7 +792,7 @@ func (tsp *TableStatisticProto) IsAuto() bool {
 // type that doesn't exist) and returns the rest (with no error).
 func (sc *TableStatisticsCache) getTableStatsFromDB(
 	ctx context.Context, tableID descpb.ID, forecast bool, st *cluster.Settings,
-) ([]*TableStatistic, map[descpb.ColumnID]*types.T, error) {
+) (_ []*TableStatistic, _ map[descpb.ColumnID]*types.T, err error) {
 	getTableStatisticsStmt := `
 SELECT
 	"tableID",
@@ -817,6 +820,23 @@ ORDER BY "createdAt" DESC, "columnIDs" DESC, "statisticID" DESC
 	if err != nil {
 		return nil, nil, err
 	}
+
+	// Guard against crashes in the code below.
+	defer func() {
+		if r := recover(); r != nil {
+			// In the event of a "safe" panic, we only want to log the error and
+			// continue executing the query without stats for this table. This is only
+			// possible because the code does not update shared state and does not
+			// manipulate locks.
+			if ok, e := errorutil.ShouldCatch(r); ok {
+				err = e
+			} else {
+				// Other panic objects can't be considered "safe" and thus are
+				// propagated as crashes that terminate the session.
+				panic(r)
+			}
+		}
+	}()
 
 	var statsList []*TableStatistic
 	var udts map[descpb.ColumnID]*types.T

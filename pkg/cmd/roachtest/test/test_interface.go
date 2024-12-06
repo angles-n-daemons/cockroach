@@ -29,7 +29,7 @@ type Test interface {
 	// StandardCockroach returns path to main cockroach binary, compiled
 	// without runtime assertions.
 	StandardCockroach() string
-	// RuntimeAssertionsCockroach returns the path to cockroach-short
+	// RuntimeAssertionsCockroach returns the path to cockroach
 	// binary compiled with --crdb_test build tag, or an empty string if
 	// no such binary was given.
 	RuntimeAssertionsCockroach() string
@@ -93,4 +93,8 @@ type Test interface {
 	// If true, the stats exporter will export metrics in openmetrics format,
 	// else, the exporter will export in the JSON format.
 	ExportOpenmetrics() bool
+
+	// GetRunId returns the run id of the roachtest run, this is set to build id
+	// when ran from teamcity
+	GetRunId() string
 }

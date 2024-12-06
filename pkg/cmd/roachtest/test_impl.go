@@ -12,7 +12,6 @@ import (
 	"math/rand"
 	"os"
 	"regexp"
-	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -34,10 +33,15 @@ import (
 // each node in the cluster.
 const perfArtifactsDir = "perf"
 
-// goCoverArtifactsDir the directory on cluster nodes in which go coverage
+// goCoverArtifactsDir is the directory on cluster nodes in which go coverage
 // profiles are dumped. At the end of a test this directory is copied into the
 // test's ArtifactsDir() from each node in the cluster.
 const goCoverArtifactsDir = "gocover"
+
+// cpuProfilesDir is the directory on cluster nodes in which pprof (CPU) profiles
+// are dumped. At the end of a test, this directory is copied into the test's
+// ArtifactsDir() from each node in the cluster if --force-cpu-profile is set.
+const cpuProfilesDir = "pprof_dump"
 
 type testStatus struct {
 	msg      string
@@ -61,10 +65,10 @@ type testImpl struct {
 	spec *registry.TestSpec
 
 	cockroach   string // path to main cockroach binary
-	cockroachEA string // path to cockroach-short binary compiled with --crdb_test build tag
+	cockroachEA string // path to cockroach binary compiled with --crdb_test build tag
 
 	randomCockroachOnce sync.Once
-	randomizedCockroach string // either `cockroach` or `cockroach-short`, picked randomly
+	randomizedCockroach string // either `cockroach` or `cockroach-ea`, picked randomly
 
 	deprecatedWorkload string // path to workload binary
 	debug              bool   // whether the test is in debug mode.
@@ -142,6 +146,8 @@ type testImpl struct {
 	// If true, the stats exporter will export metrics in openmetrics format.
 	// else the exporter will export in the JSON format.
 	exportOpenmetrics bool
+	// If set, this is used for adding labels to the benchmark metrics
+	runID string
 }
 
 func newFailure(squashedErr error, errs []error) failure {
@@ -200,6 +206,10 @@ func (t *testImpl) Cockroach() string {
 
 func (t *testImpl) ExportOpenmetrics() bool {
 	return t.exportOpenmetrics
+}
+
+func (t *testImpl) GetRunId() string {
+	return t.runID
 }
 
 func (t *testImpl) RuntimeAssertionsCockroach() string {
@@ -679,8 +689,7 @@ func (t *testImpl) IsBuildVersion(minVersion string) bool {
 }
 
 func panicHandler(_ context.Context, name string, l *logger.Logger, r interface{}) error {
-	l.Printf("panic stack trace in task %s:\n%s", name, string(debug.Stack()))
-	return fmt.Errorf("panic (stack trace above): %v", r)
+	return fmt.Errorf("test task %s panicked: %v", name, r)
 }
 
 // GoWithCancel runs the given function in a goroutine and returns a

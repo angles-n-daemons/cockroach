@@ -12,6 +12,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catenumpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/typedesc"
@@ -368,9 +369,12 @@ func getColumnIDFromColumnName(
 		return 0
 	}
 
-	_, _, colElem := scpb.FindColumn(colElems)
+	_, targetStatus, colElem := scpb.FindColumn(colElems)
 	if colElem == nil {
 		panic(errors.AssertionFailedf("programming error: cannot find a Column element for column %v", columnName))
+	}
+	if targetStatus == scpb.ToAbsent && required {
+		panic(colinfo.NewUndefinedColumnError(string(columnName)))
 	}
 	return colElem.ColumnID
 }
@@ -856,24 +860,6 @@ func makeSwapIndexSpec(
 		temp = makeTempIndexSpec(in)
 	}
 	return in, temp
-}
-
-// fallBackIfSubZoneConfigExists determines if the table has a subzone
-// config. Normally this logic is used to limit index related operations,
-// since dropping indexes will need to remove entries of sub zones from
-// the zone config.
-func fallBackIfSubZoneConfigExists(b BuildCtx, n tree.NodeFormatter, id catid.DescID) {
-	{
-		tableElts := b.QueryByID(id)
-		if _, _, elem := scpb.FindIndexZoneConfig(tableElts); elem != nil {
-			panic(scerrors.NotImplementedErrorf(n,
-				"sub zone configs are not supported"))
-		}
-		if _, _, elem := scpb.FindPartitionZoneConfig(tableElts); elem != nil {
-			panic(scerrors.NotImplementedErrorf(n,
-				"sub zone configs are not supported"))
-		}
-	}
 }
 
 // ExtractColumnIDsInExpr extracts column IDs used in expr. It's similar to
@@ -1764,10 +1750,6 @@ func mustRetrieveColumnName(
 	return b.QueryByID(tableID).FilterColumnName().
 		Filter(func(_ scpb.Status, _ scpb.TargetStatus, e *scpb.ColumnName) bool { return e.ColumnID == columnID }).
 		MustGetOneElement()
-}
-
-func mustRetrievePrimaryIndex(b BuildCtx, tableID catid.DescID) *scpb.PrimaryIndex {
-	return b.QueryByID(tableID).FilterPrimaryIndex().MustGetOneElement()
 }
 
 func retrieveColumnNotNull(

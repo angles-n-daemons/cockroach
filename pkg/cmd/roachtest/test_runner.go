@@ -51,6 +51,12 @@ import (
 	"github.com/petermattis/goid"
 )
 
+func init() {
+	pollPreemptionInterval.Lock()
+	defer pollPreemptionInterval.Unlock()
+	pollPreemptionInterval.interval = 5 * time.Minute
+}
+
 var (
 	errTestsFailed = fmt.Errorf("some tests failed")
 
@@ -837,6 +843,7 @@ func (r *testRunner) runWorker(
 			debug:                  clustersOpt.debugMode.IsDebug(),
 			goCoverEnabled:         topt.goCoverEnabled,
 			exportOpenmetrics:      topt.exportOpenMetrics,
+			runID:                  generateRunID(clustersOpt),
 		}
 		github := newGithubIssues(r.config.disableIssue, c, vmCreateOpts)
 
@@ -1061,6 +1068,14 @@ func getGoCoverArtifacts(ctx context.Context, c *clusterImpl, t test.Test) {
 		return fmt.Sprintf("%s/%d.%s", t.ArtifactsDir(), nodeIdx, goCoverArtifactsDir)
 	}
 	getArtifacts(ctx, c, t, t.GoCoverArtifactsDir(), dstDirFn)
+}
+
+// getCpuProfileArtifacts retrieves the pprof (CPU profile) artifacts for the test.
+func getCpuProfileArtifacts(ctx context.Context, c *clusterImpl, t test.Test) {
+	dstDirFn := func(nodeIdx int) string {
+		return fmt.Sprintf("%s/%d.%s", t.ArtifactsDir(), nodeIdx, cpuProfilesDir)
+	}
+	getArtifacts(ctx, c, t, filepath.Join("logs", cpuProfilesDir), dstDirFn)
 }
 
 // An error is returned if the test is still running (on another goroutine) when
@@ -1316,7 +1331,7 @@ func (r *testRunner) runTest(
 				if event.Err == nil {
 					t.L().Printf("task finished: %s", event.Name)
 					continue
-				} else if event.ExpectedCancel {
+				} else if event.TriggeredByTest {
 					t.L().Printf("task canceled by test: %s", event.Name)
 					continue
 				}
@@ -1606,14 +1621,31 @@ func (r *testRunner) teardownTest(
 	}
 
 	// Test was successful. If we are collecting code coverage, copy the files now.
+	var stopped bool
 	if t.goCoverEnabled {
 		t.L().Printf("Stopping all nodes to obtain go cover artifacts")
 		if err := c.StopE(ctx, t.L(), option.DefaultStopOpts(), c.All()); err != nil {
 			t.L().PrintfCtx(ctx, "error stopping cluster: %v", err)
 		}
 
+		stopped = true
 		t.L().Printf("Retrieving go cover artifacts")
 		getGoCoverArtifacts(ctx, c, t)
+	}
+
+	if roachtestflags.ForceCpuProfile {
+		// No need to stop the cluster again if it's already been stopped above.
+		if !stopped {
+			t.L().Printf("Stopping all nodes to obtain pprof artifacts")
+			if err := c.StopE(ctx, t.L(), option.DefaultStopOpts(), c.All()); err != nil {
+				t.L().PrintfCtx(ctx, "error stopping cluster: %v", err)
+			}
+
+			stopped = true
+		}
+
+		t.L().Printf("Retrieving pprof artifacts")
+		getCpuProfileArtifacts(ctx, c, t)
 	}
 	return "", nil
 }
@@ -2132,20 +2164,29 @@ var getPreemptedVMsHook = func(c cluster.Cluster, ctx context.Context, l *logger
 	return c.GetPreemptedVMs(ctx, l)
 }
 
-// pollPreemptionInterval is how often to poll for preempted VMs.
-var pollPreemptionInterval = 5 * time.Minute
+// pollPreemptionInterval is how often to poll for preempted VMs. We use a
+// mutex protected struct to allow for unit tests to safely modify it.
+// Interval defaults to 5 minutes if not set.
+var pollPreemptionInterval struct {
+	syncutil.Mutex
+	interval time.Duration
+}
 
 func monitorForPreemptedVMs(ctx context.Context, t test.Test, c cluster.Cluster, l *logger.Logger) {
 	if c.IsLocal() || !c.Spec().UseSpotVMs {
 		return
 	}
 
+	pollPreemptionInterval.Lock()
+	defer pollPreemptionInterval.Unlock()
+	interval := pollPreemptionInterval.interval
+
 	go func() {
 		for {
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(pollPreemptionInterval):
+			case <-time.After(interval):
 				preemptedVMs, err := getPreemptedVMsHook(c, ctx, l)
 				if err != nil {
 					l.Printf("WARN: monitorForPreemptedVMs: failed to check preempted VMs:\n%+v", err)

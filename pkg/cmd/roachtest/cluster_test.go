@@ -73,6 +73,10 @@ type testWrapper struct {
 	l *logger.Logger
 }
 
+func (t testWrapper) GetRunId() string {
+	return "mock-run-id"
+}
+
 func (t testWrapper) ExportOpenmetrics() bool {
 	return false
 }
@@ -94,7 +98,7 @@ func (t testWrapper) StandardCockroach() string {
 }
 
 func (t testWrapper) RuntimeAssertionsCockroach() string {
-	return "./dummy-path/to/cockroach-short"
+	return "./dummy-path/to/cockroach-ea"
 }
 
 func (t testWrapper) DeprecatedWorkload() string {

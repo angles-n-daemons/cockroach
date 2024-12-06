@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -319,8 +320,8 @@ func TestRunnerTestTimeout(t *testing.T) {
 	copt := defaultClusterOpt()
 	lopt := defaultLoggingOpt(&buf)
 	numTasks := 3
-	startedAllTasks := make(chan struct{})
-	var tasksDone atomic.Uint32
+	tasksWaitGroup := sync.WaitGroup{}
+	tasksWaitGroup.Add(numTasks)
 	test := registry.TestSpec{
 		Name:             `timeout`,
 		Owner:            OwnerUnitTest,
@@ -333,13 +334,12 @@ func TestRunnerTestTimeout(t *testing.T) {
 			for i := 0; i < numTasks; i++ {
 				t.Go(func(taskCtx context.Context, l *logger.Logger) error {
 					defer func() {
-						tasksDone.Add(1)
+						tasksWaitGroup.Done()
 					}()
 					<-taskCtx.Done()
 					return nil
 				})
 			}
-			close(startedAllTasks)
 			<-ctx.Done()
 		},
 	}
@@ -356,8 +356,7 @@ func TestRunnerTestTimeout(t *testing.T) {
 	}
 
 	// Ensure tasks are also canceled.
-	<-startedAllTasks
-	require.Equal(t, uint32(numTasks), tasksDone.Load())
+	tasksWaitGroup.Wait()
 }
 
 func TestRegistryPrepareSpec(t *testing.T) {
@@ -720,6 +719,12 @@ func TestVMPreemptionPolling(t *testing.T) {
 		},
 	}
 
+	setPollPreemptionInterval := func(interval time.Duration) {
+		pollPreemptionInterval.Lock()
+		defer pollPreemptionInterval.Unlock()
+		pollPreemptionInterval.interval = interval
+	}
+
 	getPreemptedVMsHook = func(c cluster.Cluster, ctx context.Context, l *logger.Logger) ([]vm.PreemptedVM, error) {
 		preemptedVMs := []vm.PreemptedVM{{
 			Name:        "test_node",
@@ -732,13 +737,13 @@ func TestVMPreemptionPolling(t *testing.T) {
 		getPreemptedVMsHook = func(c cluster.Cluster, ctx context.Context, l *logger.Logger) ([]vm.PreemptedVM, error) {
 			return c.GetPreemptedVMs(ctx, l)
 		}
-		pollPreemptionInterval = 5 * time.Minute
+		setPollPreemptionInterval(5 * time.Minute)
 	}()
 
 	// Test that if a VM is preempted, the VM preemption monitor will catch
 	// it and cancel the test before it times out.
 	t.Run("polling cancels test", func(t *testing.T) {
-		pollPreemptionInterval = 50 * time.Millisecond
+		setPollPreemptionInterval(50 * time.Millisecond)
 
 		err := runner.Run(ctx, []registry.TestSpec{mockTest}, 1, /* count */
 			defaultParallelism, copt, testOpts{}, lopt)
@@ -751,7 +756,7 @@ func TestVMPreemptionPolling(t *testing.T) {
 	// test finished first, the post failure checks will check again and mark it as a flake.
 	t.Run("polling doesn't catch preemption", func(t *testing.T) {
 		// Set the interval very high so we don't poll for preemptions.
-		pollPreemptionInterval = 1 * time.Hour
+		setPollPreemptionInterval(1 * time.Hour)
 
 		mockTest.Run = func(ctx context.Context, t test.Test, c cluster.Cluster) {
 			t.Error("Should be ignored")

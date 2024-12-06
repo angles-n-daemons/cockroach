@@ -17,12 +17,16 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
+	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvpb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/batcheval"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvflowcontrol"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvflowcontrol/kvflowinspectpb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvflowcontrol/rac2"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverbase"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/stateloader"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/server"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
@@ -34,6 +38,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/testutils/testcluster"
 	"github.com/cockroachdb/cockroach/pkg/util/admission"
 	"github.com/cockroachdb/cockroach/pkg/util/admission/admissionpb"
+	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
@@ -592,18 +597,16 @@ func TestFlowControlCrashedNode(t *testing.T) {
 	// mechanism below, and for quiesced ranges, that can effectively disable
 	// the last-updated mechanism since quiesced ranges aren't being ticked, and
 	// we only check the last-updated state when ticked. So we disable range
-	// quiescence.
-	kvserver.ExpirationLeasesOnly.Override(ctx, &st.SV, true)
-	kvflowcontrol.Enabled.Override(ctx, &st.SV, true)
-
+	// quiescence by turning on leader leases, regardless of any metamorphism.
+	kvserver.OverrideDefaultLeaseType(ctx, &st.SV, roachpb.LeaseLeader)
+	// Using a manual clock here ensures that StoreLiveness support, once
+	// established, never expires. By extension, leadership should stay sticky.
+	manualClock := hlc.NewHybridManualClock()
 	tc := testcluster.StartTestCluster(t, numNodes, base.TestClusterArgs{
 		ReplicationMode: base.ReplicationManual,
 		ServerArgs: base.TestServerArgs{
 			Settings: st,
 			RaftConfig: base.RaftConfig{
-				// Suppress timeout-based elections. This test doesn't want to
-				// deal with leadership changing hands.
-				RaftElectionTimeoutTicks: 1000000,
 				// Reduce the RangeLeaseDuration to speeds up failure detection
 				// below.
 				RangeLeaseDuration: time.Second,
@@ -627,6 +630,9 @@ func TestFlowControlCrashedNode(t *testing.T) {
 					DisableWorkQueueGranting: func() bool {
 						return true
 					},
+				},
+				Server: &server.TestingKnobs{
+					WallClock: manualClock,
 				},
 			},
 		},
@@ -712,7 +718,13 @@ func TestFlowControlRaftSnapshot(t *testing.T) {
 	st := cluster.MakeTestingClusterSettings()
 	kvflowcontrol.Enabled.Override(ctx, &st.SV, true)
 	kvflowcontrol.Mode.Override(ctx, &st.SV, kvflowcontrol.ApplyToAll)
-
+	// This test doesn't want leadership changing hands, and leader leases (by
+	// virtue of raft fortification) help ensure this. Override to disable any
+	// metamorphosis.
+	kvserver.OverrideDefaultLeaseType(ctx, &st.SV, roachpb.LeaseLeader)
+	// Using a manual clock here ensures that StoreLiveness support, once
+	// established, never expires. By extension, leadership should stay sticky.
+	manualClock := hlc.NewHybridManualClock()
 	for i := 0; i < numServers; i++ {
 		stickyServerArgs[i] = base.TestServerArgs{
 			Settings: st,
@@ -722,14 +734,10 @@ func TestFlowControlRaftSnapshot(t *testing.T) {
 					StickyVFSID: strconv.FormatInt(int64(i), 10),
 				},
 			},
-			RaftConfig: base.RaftConfig{
-				// Suppress timeout-based elections. This test doesn't want to
-				// deal with leadership changing hands.
-				RaftElectionTimeoutTicks: 1000000,
-			},
 			Knobs: base.TestingKnobs{
 				Server: &server.TestingKnobs{
 					StickyVFSRegistry: fs.NewStickyRegistry(),
+					WallClock:         manualClock,
 				},
 				Store: &kvserver.StoreTestingKnobs{
 					FlowControlTestingKnobs: &kvflowcontrol.TestingKnobs{
@@ -1003,17 +1011,21 @@ func TestFlowControlRaftTransportBreak(t *testing.T) {
 
 	st := cluster.MakeTestingClusterSettings()
 	kvflowcontrol.Enabled.Override(ctx, &st.SV, true)
-
+	// This test doesn't want leadership changing hands, and leader leases (by
+	// virtue of raft fortification) help ensure this. Override to disable any
+	// metamorphosis.
+	kvserver.OverrideDefaultLeaseType(ctx, &st.SV, roachpb.LeaseLeader)
+	// Using a manual clock here ensures that StoreLiveness support, once
+	// established, never expires. By extension, leadership should stay sticky.
+	manualClock := hlc.NewHybridManualClock()
 	tc := testcluster.StartTestCluster(t, numNodes, base.TestClusterArgs{
 		ReplicationMode: base.ReplicationManual,
 		ServerArgs: base.TestServerArgs{
 			Settings: st,
-			RaftConfig: base.RaftConfig{
-				// Suppress timeout-based elections. This test doesn't want to
-				// deal with leadership changing hands.
-				RaftElectionTimeoutTicks: 1000000,
-			},
 			Knobs: base.TestingKnobs{
+				Server: &server.TestingKnobs{
+					WallClock: manualClock,
+				},
 				Store: &kvserver.StoreTestingKnobs{
 					FlowControlTestingKnobs: &kvflowcontrol.TestingKnobs{
 						UseOnlyForScratchRanges: true,
@@ -1594,7 +1606,7 @@ func TestFlowControlQuiescedRange(t *testing.T) {
 	disableFallbackTokenDispatch.Store(true)
 
 	st := cluster.MakeTestingClusterSettings()
-	kvserver.ExpirationLeasesOnly.Override(ctx, &st.SV, false) // override metamorphism
+	kvserver.OverrideDefaultLeaseType(ctx, &st.SV, roachpb.LeaseEpoch) // override metamorphism
 	kvflowcontrol.Enabled.Override(ctx, &st.SV, true)
 
 	tc := testcluster.StartTestCluster(t, numNodes, base.TestClusterArgs{
@@ -1734,7 +1746,7 @@ func TestFlowControlUnquiescedRange(t *testing.T) {
 	disablePiggybackTokenDispatch.Store(true)
 
 	st := cluster.MakeTestingClusterSettings()
-	kvserver.ExpirationLeasesOnly.Override(ctx, &st.SV, false) // override metamorphism
+	kvserver.OverrideDefaultLeaseType(ctx, &st.SV, roachpb.LeaseEpoch) // override metamorphism
 	kvflowcontrol.Enabled.Override(ctx, &st.SV, true)
 
 	tc := testcluster.StartTestCluster(t, numNodes, base.TestClusterArgs{
@@ -2541,16 +2553,21 @@ func TestFlowControlAdmissionPostSplitMergeV2(t *testing.T) {
 			var disableWorkQueueGranting atomic.Bool
 			disableWorkQueueGranting.Store(true)
 			settings := cluster.MakeTestingClusterSettings()
+			// This test doesn't want leadership changing hands, and leader leases (by
+			// virtue of raft fortification) help ensure this. Override to disable any
+			// metamorphosis.
+			kvserver.OverrideDefaultLeaseType(ctx, &settings.SV, roachpb.LeaseLeader)
+			// Using a manual clock here ensures that StoreLiveness support, once
+			// established, never expires. By extension, leadership should stay
+			// sticky.
+			manualClock := hlc.NewHybridManualClock()
 			tc := testcluster.StartTestCluster(t, 3, base.TestClusterArgs{
 				ReplicationMode: base.ReplicationManual,
 				ServerArgs: base.TestServerArgs{
-					Settings: settings,
-					RaftConfig: base.RaftConfig{
-						// Suppress timeout-based elections. This test doesn't want to
-						// deal with leadership changing hands.
-						RaftElectionTimeoutTicks: 1000000,
-					},
 					Knobs: base.TestingKnobs{
+						Server: &server.TestingKnobs{
+							WallClock: manualClock,
+						},
 						Store: &kvserver.StoreTestingKnobs{
 							FlowControlTestingKnobs: &kvflowcontrol.TestingKnobs{
 								UseOnlyForScratchRanges: true,
@@ -2693,7 +2710,11 @@ func TestFlowControlCrashedNodeV2(t *testing.T) {
 		}, func(t *testing.T, mode kvflowcontrol.ModeT) {
 			ctx := context.Background()
 			settings := cluster.MakeTestingClusterSettings()
-			kvserver.ExpirationLeasesOnly.Override(ctx, &settings.SV, true)
+			// This test doesn't want leadership changing hands, and leader leases (by
+			// virtue of raft fortification) help ensure this. Override to disable any
+			// metamorphosis.
+			// TODO(arulajmani): Re-enable leader leases on this test, see #136292.
+			kvserver.OverrideLeaderLeaseMetamorphism(ctx, &settings.SV)
 			tc := testcluster.StartTestCluster(t, 2, base.TestClusterArgs{
 				ReplicationMode: base.ReplicationManual,
 				ServerArgs: base.TestServerArgs{
@@ -2808,6 +2829,14 @@ func TestFlowControlRaftSnapshotV2(t *testing.T) {
 			bypassReplicaUnreachable.Store(false)
 			ctx := context.Background()
 			settings := cluster.MakeTestingClusterSettings()
+			// This test doesn't want leadership changing hands, and leader leases (by
+			// virtue of raft fortification) help ensure this. Override to disable any
+			// metamorphosis.
+			kvserver.OverrideDefaultLeaseType(ctx, &settings.SV, roachpb.LeaseLeader)
+			// Using a manual clock here ensures that StoreLiveness support, once
+			// established, never expires. By extension, leadership should stay
+			// sticky.
+			manualClock := hlc.NewHybridManualClock()
 			for i := 0; i < numServers; i++ {
 				stickyServerArgs[i] = base.TestServerArgs{
 					Settings: settings,
@@ -2817,14 +2846,10 @@ func TestFlowControlRaftSnapshotV2(t *testing.T) {
 							StickyVFSID: strconv.FormatInt(int64(i), 10),
 						},
 					},
-					RaftConfig: base.RaftConfig{
-						// Suppress timeout-based elections. This test doesn't want to
-						// deal with leadership changing hands.
-						RaftElectionTimeoutTicks: 1000000,
-					},
 					Knobs: base.TestingKnobs{
 						Server: &server.TestingKnobs{
 							StickyVFSRegistry: fs.NewStickyRegistry(),
+							WallClock:         manualClock,
 						},
 						Store: &kvserver.StoreTestingKnobs{
 							RaftReportUnreachableBypass: func(_ roachpb.ReplicaID) bool {
@@ -3074,15 +3099,18 @@ func TestFlowControlRaftMembershipV2(t *testing.T) {
 			settings := cluster.MakeTestingClusterSettings()
 			var disableWorkQueueGranting atomic.Bool
 			disableWorkQueueGranting.Store(true)
+			// This test doesn't want leadership changing hands, and leader leases (by
+			// virtue of raft fortification) help ensure this. Override to disable any
+			// metamorphosis.
+			kvserver.OverrideDefaultLeaseType(ctx, &settings.SV, roachpb.LeaseLeader)
+			// Using a manual clock here ensures that StoreLiveness support, once
+			// established, never expires. By extension, leadership should stay
+			// sticky.
+			manualClock := hlc.NewHybridManualClock()
 			tc := testcluster.StartTestCluster(t, 5, base.TestClusterArgs{
 				ReplicationMode: base.ReplicationManual,
 				ServerArgs: base.TestServerArgs{
 					Settings: settings,
-					RaftConfig: base.RaftConfig{
-						// Suppress timeout-based elections. This test doesn't want to deal
-						// with leadership changing hands unless intentional.
-						RaftElectionTimeoutTicks: 1000000,
-					},
 					Knobs: base.TestingKnobs{
 						Store: &kvserver.StoreTestingKnobs{
 							FlowControlTestingKnobs: &kvflowcontrol.TestingKnobs{
@@ -3097,6 +3125,9 @@ func TestFlowControlRaftMembershipV2(t *testing.T) {
 							DisableWorkQueueGranting: func() bool {
 								return disableWorkQueueGranting.Load()
 							},
+						},
+						Server: &server.TestingKnobs{
+							WallClock: manualClock,
 						},
 					},
 				},
@@ -3453,7 +3484,7 @@ func TestFlowControlUnquiescedRangeV2(t *testing.T) {
 
 			settings := cluster.MakeTestingClusterSettings()
 			// Override metamorphism to allow range quiescence.
-			kvserver.ExpirationLeasesOnly.Override(ctx, &settings.SV, false)
+			kvserver.OverrideDefaultLeaseType(ctx, &settings.SV, roachpb.LeaseEpoch)
 			tc := testcluster.StartTestCluster(t, 3, base.TestClusterArgs{
 				ReplicationMode: base.ReplicationManual,
 				ServerArgs: base.TestServerArgs{
@@ -3911,18 +3942,23 @@ func TestFlowControlV1ToV2Transition(t *testing.T) {
 	settings := cluster.MakeTestingClusterSettings()
 
 	argsPerServer := make(map[int]base.TestServerArgs)
+	// This test doesn't want leadership changing hands, and leader leases (by
+	// virtue of raft fortification) help ensure this. Override to disable any
+	// metamorphosis.
+	kvserver.OverrideDefaultLeaseType(ctx, &settings.SV, roachpb.LeaseLeader)
+	// Using a manual clock here ensures that StoreLiveness support, once
+	// established, never expires. By extension, leadership should stay sticky.
+	manualClock := hlc.NewHybridManualClock()
 	for i := range serverLevels {
 		// Every node starts off using the v1 protocol but we will ratchet up the
 		// levels on servers at different times as we go to test the transition.
 		serverLevels[i].Store(kvflowcontrol.V2NotEnabledWhenLeader)
 		argsPerServer[i] = base.TestServerArgs{
 			Settings: settings,
-			RaftConfig: base.RaftConfig{
-				// Suppress timeout-based elections. This test doesn't want to deal
-				// with leadership changing hands unintentionally.
-				RaftElectionTimeoutTicks: 1000000,
-			},
 			Knobs: base.TestingKnobs{
+				Server: &server.TestingKnobs{
+					WallClock: manualClock,
+				},
 				Store: &kvserver.StoreTestingKnobs{
 					FlowControlTestingKnobs: &kvflowcontrol.TestingKnobs{
 						UseOnlyForScratchRanges: true,
@@ -4536,13 +4572,6 @@ func TestFlowControlSendQueue(t *testing.T) {
 		}
 	}
 
-	mkStream := func(serverIdx int) kvflowcontrol.Stream {
-		return kvflowcontrol.Stream{
-			StoreID:  roachpb.StoreID(serverIdx + 1),
-			TenantID: roachpb.SystemTenantID,
-		}
-	}
-
 	settings := cluster.MakeTestingClusterSettings()
 	kvflowcontrol.Mode.Override(ctx, &settings.SV, kvflowcontrol.ApplyToAll)
 	// We want to exhaust tokens but not overload the test, so we set the limits
@@ -4550,6 +4579,13 @@ func TestFlowControlSendQueue(t *testing.T) {
 	kvflowcontrol.ElasticTokensPerStream.Override(ctx, &settings.SV, 2<<20)
 	kvflowcontrol.RegularTokensPerStream.Override(ctx, &settings.SV, 4<<20)
 
+	// This test doesn't want leadership changing hands, and leader leases (by
+	// virtue of raft fortification) help ensure this. Override to disable any
+	// metamorphosis.
+	kvserver.OverrideDefaultLeaseType(ctx, &settings.SV, roachpb.LeaseLeader)
+	// Using a manual clock here ensures that StoreLiveness support, once
+	// established, never expires. By extension, leadership should stay sticky.
+	manualClock := hlc.NewHybridManualClock()
 	stickyArgsPerServer := make(map[int]base.TestServerArgs)
 	for i := range disableWorkQueueGrantingServers {
 		// Start with admission (logical token return) disabled across all nodes.
@@ -4562,14 +4598,10 @@ func TestFlowControlSendQueue(t *testing.T) {
 					StickyVFSID: strconv.FormatInt(int64(i), 10),
 				},
 			},
-			RaftConfig: base.RaftConfig{
-				// Suppress timeout-based elections. This test doesn't want to deal
-				// with leadership changing hands unintentionally.
-				RaftElectionTimeoutTicks: 1000000,
-			},
 			Knobs: base.TestingKnobs{
 				Server: &server.TestingKnobs{
 					StickyVFSRegistry: fs.NewStickyRegistry(),
+					WallClock:         manualClock,
 				},
 				Store: &kvserver.StoreTestingKnobs{
 					FlowControlTestingKnobs: &kvflowcontrol.TestingKnobs{
@@ -4703,7 +4735,7 @@ func TestFlowControlSendQueue(t *testing.T) {
 	setTokenReturnEnabled(true /* enabled */, 0, 1)
 	// Wait for token return on n1, n2. We should only be tracking the tokens for
 	// n3 now.
-	h.waitForAllTokensReturnedForStreamsV2(ctx, 0 /* serverIdx */, mkStream(0), mkStream(1))
+	h.waitForAllTokensReturnedForStreamsV2(ctx, 0 /* serverIdx */, testingMkFlowStream(0), testingMkFlowStream(1))
 	h.waitForTotalTrackedTokens(ctx, desc.RangeID, 4<<20 /* 4MiB */, 0 /* serverIdx */)
 	h.comment(`-- Observe the total tracked tokens per-stream on n1.`)
 	h.query(n1, `
@@ -4723,7 +4755,7 @@ func TestFlowControlSendQueue(t *testing.T) {
 	// NB: The write won't be tracked because the quorum [n1,n2] have tokens for
 	// eval.
 	h.waitForTotalTrackedTokens(ctx, desc.RangeID, 5<<20 /* 5 MiB */, 0 /* serverIdx */)
-	h.waitForAllTokensReturnedForStreamsV2(ctx, 0 /* serverIdx */, mkStream(0))
+	h.waitForAllTokensReturnedForStreamsV2(ctx, 0 /* serverIdx */, testingMkFlowStream(0))
 	h.waitForSendQueueSize(ctx, desc.RangeID, 1<<20 /* 1MiB expSize */, 0 /* serverIdx */)
 	h.comment(`
 -- The send queue metrics from n1 should reflect the 1 MiB write being queued
@@ -4739,7 +4771,7 @@ func TestFlowControlSendQueue(t *testing.T) {
 	h.waitForConnectedStreams(ctx, desc.RangeID, 2, 0 /* serverIdx */)
 	// There should also be 5 MiB of tracked tokens for n1->n3, 4 + 1 MiB.
 	h.waitForTotalTrackedTokens(ctx, desc.RangeID, 5<<20 /* 5 MiB */, 0 /* serverIdx */)
-	h.waitForAllTokensReturnedForStreamsV2(ctx, 0 /* serverIdx */, mkStream(0), mkStream(1))
+	h.waitForAllTokensReturnedForStreamsV2(ctx, 0 /* serverIdx */, testingMkFlowStream(0), testingMkFlowStream(1))
 	h.waitForSendQueueSize(ctx, desc.RangeID, 0 /* expSize */, 0 /* serverIdx */)
 	h.comment(`
 -- Flow token metrics from n1, the disconnect should be reflected in the metrics.`)
@@ -4767,7 +4799,7 @@ func TestFlowControlSendQueue(t *testing.T) {
 	h.comment(`-- (Disabling wait-for-eval bypass.)`)
 	noopWaitForEval.Store(false)
 	h.waitForTotalTrackedTokens(ctx, desc.RangeID, 6<<20 /* 6 MiB */, 0 /* serverIdx */)
-	h.waitForAllTokensReturnedForStreamsV2(ctx, 0 /* serverIdx */, mkStream(0), mkStream(1))
+	h.waitForAllTokensReturnedForStreamsV2(ctx, 0 /* serverIdx */, testingMkFlowStream(0), testingMkFlowStream(1))
 
 	h.comment(`
 -- Send queue metrics from n1, n3's should not be allowed to form a send queue.`)
@@ -4827,7 +4859,7 @@ ORDER BY streams DESC;
 	// admission is allowed. While n4,n5 will continue to track as they are
 	// blocked from admitting.
 	h.waitForTotalTrackedTokens(ctx, desc.RangeID, 8<<20 /* 8 MiB */, 0 /* serverIdx */)
-	h.waitForAllTokensReturnedForStreamsV2(ctx, 0 /* serverIdx */, mkStream(0), mkStream(1), mkStream(2))
+	h.waitForAllTokensReturnedForStreamsV2(ctx, 0 /* serverIdx */, testingMkFlowStream(0), testingMkFlowStream(1), testingMkFlowStream(2))
 	h.comment(`
 -- From n1. We should expect to see the unblocked streams quickly
 -- untrack as admission is allowed (so not observed here), while n4,n5 will continue
@@ -4845,7 +4877,7 @@ ORDER BY streams DESC;
 	// quickly admits and untracks. While n4,n5 queue the write, not sending the
 	// msg, deducting and tracking the entry tokens.
 	h.waitForTotalTrackedTokens(ctx, desc.RangeID, 8<<20 /* 8 MiB */, 0 /* serverIdx */)
-	h.waitForAllTokensReturnedForStreamsV2(ctx, 0 /* serverIdx */, mkStream(0), mkStream(1), mkStream(2))
+	h.waitForAllTokensReturnedForStreamsV2(ctx, 0 /* serverIdx */, testingMkFlowStream(0), testingMkFlowStream(1), testingMkFlowStream(2))
 	h.comment(`
 -- Send queue and flow token metrics from n1. The 1 MiB write should be queued
 -- for n4,n5, while the quorum (n1,n2,n3) proceeds.
@@ -4891,7 +4923,7 @@ ORDER BY streams DESC;
 	// Expect 4 x 4 MiB tracked tokens for the 4 MiB write = 16 MiB.
 	// Expect 2 x 1 MiB tracked tokens for the 1 MiB write =  2 MiB.
 	h.waitForTotalTrackedTokens(ctx, desc.RangeID, 18<<20 /* 18MiB */, 0 /* serverIdx */)
-	h.waitForAllTokensReturnedForStreamsV2(ctx, 0 /* serverIdx */, mkStream(0))
+	h.waitForAllTokensReturnedForStreamsV2(ctx, 0 /* serverIdx */, testingMkFlowStream(0))
 	h.comment(`
 -- Observe the total tracked tokens per-stream on n1. We should expect to see the
 -- 1 MiB write being tracked across a quorum of streams, while the 4 MiB write
@@ -4911,6 +4943,733 @@ ORDER BY streams DESC;
 	setTokenReturnEnabled(true /* enabled */, 0, 1, 2, 3, 4)
 
 	h.waitForAllTokensReturned(ctx, 5, 0 /* serverIdx */)
+	h.comment(`
+-- Send queue and flow token metrics from n1. All tokens should be returned.`)
+	h.query(n1, flowSendQueueQueryStr)
+	h.query(n1, flowPerStoreTokenQueryStr, flowPerStoreTokenQueryHeaderStrs...)
+}
+
+func TestFlowControlRepeatedlySwitchMode(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	ctx := context.Background()
+	settings := cluster.MakeTestingClusterSettings()
+	// This test doesn't want leadership changing hands, and leader leases (by
+	// virtue of raft fortification) help ensure this. Override to disable any
+	// metamorphosis.
+	kvserver.OverrideDefaultLeaseType(ctx, &settings.SV, roachpb.LeaseLeader)
+	// Using a manual clock here ensures that StoreLiveness support, once
+	// established, never expires. By extension, leadership should stay sticky.
+	manualClock := hlc.NewHybridManualClock()
+	tc := testcluster.StartTestCluster(t, 3, base.TestClusterArgs{
+		ReplicationMode: base.ReplicationManual,
+		ServerArgs: base.TestServerArgs{
+			Settings: settings,
+			Knobs: base.TestingKnobs{
+				Store: &kvserver.StoreTestingKnobs{
+					FlowControlTestingKnobs: &kvflowcontrol.TestingKnobs{
+						UseOnlyForScratchRanges: true,
+						OverrideTokenDeduction: func(_ kvflowcontrol.Tokens) kvflowcontrol.Tokens {
+							// This test makes use of (small) increment requests, but
+							// wants to see large token deductions/returns.
+							return kvflowcontrol.Tokens(1 << 20 /* 1MiB */)
+						},
+					},
+				},
+				Server: &server.TestingKnobs{
+					WallClock: manualClock,
+				},
+			},
+		},
+	})
+	defer tc.Stopper().Stop(ctx)
+
+	// Setup the test state with 3 voters, one on each of the three
+	// node/stores.
+	k := tc.ScratchRange(t)
+	tc.AddVotersOrFatal(t, k, tc.Targets(1, 2)...)
+	h := newFlowControlTestHelperV2(t, tc, kvflowcontrol.V2EnabledWhenLeaderV2Encoding)
+	mode := kvflowcontrol.ApplyToElastic
+	h.init(mode)
+
+	desc, err := tc.LookupRange(k)
+	require.NoError(t, err)
+	h.waitForConnectedStreams(ctx, desc.RangeID, 3, 0 /* serverIdx */)
+	h.resetV2TokenMetrics(ctx)
+
+	finishedCh := make(chan struct{})
+	go func() {
+		defer close(finishedCh)
+		// Switch the mode 10 times, with 100ms of sleep in between.
+		for i := 0; i < 10; i++ {
+			time.Sleep(100 * time.Millisecond)
+			switch mode {
+			case kvflowcontrol.ApplyToElastic:
+				mode = kvflowcontrol.ApplyToAll
+			case kvflowcontrol.ApplyToAll:
+				mode = kvflowcontrol.ApplyToElastic
+			}
+			kvflowcontrol.Mode.Override(ctx, &tc.Server(0).ClusterSettings().SV, mode)
+		}
+	}()
+	// Loop until finishedCh is signaled.
+	for done := false; !done; {
+		// Randomly put NormalPri or BulkLowPri.
+		pri := admissionpb.NormalPri
+		if h.rng.Intn(2) == 0 {
+			pri = admissionpb.BulkLowPri
+		}
+		h.put(contextWithTestGeneratedPut(ctx), k, 1, pri)
+		select {
+		case <-finishedCh:
+			done = true
+		default:
+		}
+	}
+	// All tokens must be returned.
+	h.waitForAllTokensReturnedForStreamsV2(ctx, 0 /* serverIdx */)
+}
+
+// TODO(kvoli): Add the following tests which exercise interesting events while
+// send tokens are exhausted on a partial number, or on all streams:
+// - TestFlowControlSendQueueRangeSplitMerge
+// - TestFlowControlSendQueueTransferLease
+// - TestFlowControlSendQueueRaftMembershipRemoveSelf
+// - TestFlowControlSendQueueRaftMembership
+// - TestFlowControlSendQueueRaftSnapshot
+// - TestFlowControlSendQueueLeaderNotLeaseholder
+// - TestFlowControlSendQueueGranterAdmitOneByOne
+
+// TestFlowControlSendQueueManyInflight exercises send queue formation,
+// prevention and quickly draining 1k+ entries tracked in the send queue, in
+// order to exercise a raft inflight tracking with a large number of inflight
+// entries.
+func TestFlowControlSendQueueManyInflight(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	ctx := context.Background()
+	var disableWorkQueueGranting atomic.Bool
+	disableWorkQueueGranting.Store(false)
+	var tokenDeduction atomic.Int64
+	tokenDeduction.Store(1 /* 1b */)
+	var noopWaitForEval atomic.Bool
+
+	settings := cluster.MakeTestingClusterSettings()
+	tc := testcluster.StartTestCluster(t, 3, base.TestClusterArgs{
+		ReplicationMode: base.ReplicationManual,
+		ServerArgs: base.TestServerArgs{
+			Settings: settings,
+			Knobs: base.TestingKnobs{
+				Store: &kvserver.StoreTestingKnobs{
+					FlowControlTestingKnobs: &kvflowcontrol.TestingKnobs{
+						UseOnlyForScratchRanges: true,
+						OverrideTokenDeduction: func(tokens kvflowcontrol.Tokens) kvflowcontrol.Tokens {
+							return kvflowcontrol.Tokens(tokenDeduction.Load())
+						},
+						OverrideBypassAdmitWaitForEval: func(ctx context.Context) (bypass bool, waited bool) {
+							bypassAndWaited := noopWaitForEval.Load()
+							if bypassAndWaited {
+								return true, true
+							}
+							if !isTestGeneratedPut(ctx) {
+								return true, false
+							}
+							return false, false
+						},
+						// We want to test the behavior of the send queue, so we want to
+						// always have up-to-date stats. This ensures that the send queue
+						// stats are always refreshed on each call to
+						// RangeController.HandleRaftEventRaftMuLocked.
+						OverrideAlwaysRefreshSendStreamStats: true,
+					},
+				},
+				AdmissionControl: &admission.TestingKnobs{
+					DisableWorkQueueFastPath: true,
+					DisableWorkQueueGranting: func() bool {
+						return disableWorkQueueGranting.Load()
+					},
+				},
+			},
+		},
+	})
+	defer tc.Stopper().Stop(ctx)
+
+	h := newFlowControlTestHelper(
+		t, tc, "flow_control_integration_v2", /* testdata */
+		kvflowcontrol.V2EnabledWhenLeaderV2Encoding, true, /* isStatic */
+	)
+	h.init(kvflowcontrol.ApplyToAll)
+	defer h.close("send_queue_many_inflight")
+
+	k := tc.ScratchRange(t)
+	tc.AddVotersOrFatal(t, k, tc.Targets(1, 2)...)
+	desc, err := tc.LookupRange(k)
+	require.NoError(t, err)
+
+	n1 := sqlutils.MakeSQLRunner(tc.ServerConn(0))
+	h.waitForConnectedStreams(ctx, desc.RangeID, 3, 0 /* serverIdx */)
+	// Reset the token metrics, since a send queue may have instantly
+	// formed when adding one of the replicas, before being quickly
+	// drained.
+	h.resetV2TokenMetrics(ctx)
+	h.waitForAllTokensReturned(ctx, 3, 0 /* serverIdx */)
+	h.comment(`
+-- We will exhaust the tokens across all streams while admission is blocked,
+-- using a single 16 MiB (deduction, the write itself is small) write. Then,
+-- we will write a thousand or so entries (@ 4KiB deduction) which should be
+-- queued towards one of the replica send streams, while the other has a send
+-- queue prevented from forming. Lastly, we will unblock admission and stress
+-- the raft in-flights tracker as the queue is drained.`)
+	h.comment(`
+-- Initial per-store tokens available from n1. 
+`)
+	h.query(n1, flowPerStoreTokenQueryStr, flowPerStoreTokenQueryHeaderStrs...)
+	h.comment(`-- (Blocking below-raft admission on [n1,n2,n3].)`)
+	disableWorkQueueGranting.Store(true)
+
+	h.comment(`-- (Issuing 16MiB regular write that's not admitted.)`)
+	tokenDeduction.Store(16 << 20)
+	h.put(contextWithTestGeneratedPut(ctx), k, 1 /* 16 MiB deducted */, admissionpb.NormalPri)
+	h.waitForTotalTrackedTokens(ctx, desc.RangeID, 48<<20 /* 48MiB */, 0 /* serverIdx */)
+
+	h.comment(`
+-- Per-store tokens available from n1, these should reflect the prior
+-- large write.`)
+	h.query(n1, flowPerStoreTokenQueryStr, flowPerStoreTokenQueryHeaderStrs...)
+	h.comment(`
+-- Observe the total tracked tokens per-stream on n1, these should also reflect the
+-- large write.`)
+	h.query(n1, `
+  SELECT range_id, store_id, crdb_internal.humanize_bytes(total_tracked_tokens::INT8)
+    FROM crdb_internal.kv_flow_control_handles_v2
+`, "range_id", "store_id", "total_tracked_tokens")
+
+	h.comment(`-- (Enabling wait-for-eval bypass.)`)
+	noopWaitForEval.Store(true)
+	h.comment(`-- (Issuing 1024x4KiB(=4MiB) regular writes that are not admitted.)`)
+	// We issue exactly 4 MiB worth of writes by issuing 1024 writes of 4KiB
+	// each.
+	tokenDeduction.Store(4 << 10 /* 4KiB */)
+	for i := 0; i < 1024; i++ {
+		h.put(contextWithTestGeneratedPut(ctx), k, 1, admissionpb.NormalPri)
+	}
+	h.comment(`-- (Disabling wait-for-eval bypass.)`)
+	noopWaitForEval.Store(false)
+
+	h.waitForTotalTrackedTokens(ctx, desc.RangeID, 56<<20 /* 48+2*4=56MiB */, 0 /* serverIdx */)
+	h.waitForSendQueueSize(ctx, desc.RangeID, 4<<20 /* 1024*4KiB=4MiB expSize */, 0 /* serverIdx */)
+	h.comment(`
+-- Per-store tokens available from n1, these should reflect the deducted
+-- tokens from preventing send queue formation.`)
+	h.query(n1, flowPerStoreTokenQueryStr, flowPerStoreTokenQueryHeaderStrs...)
+	h.comment(`
+-- Send queue metrics from n1, a send queue should have formed for one of the
+-- replica send streams, while the other (non-leader stream) should have been
+-- prevented from forming. It should be 1024*4KiB=4MiB in size.`)
+	h.query(n1, flowSendQueueQueryStr)
+	h.comment(`
+-- Observe the total tracked tokens per-stream on n1, one of the three
+-- streams will only be tracking the 16 MiB write, while the other two will
+-- track the 1024x4KiB writes as well.`)
+	h.query(n1, `
+  SELECT range_id, store_id, crdb_internal.humanize_bytes(total_tracked_tokens::INT8)
+    FROM crdb_internal.kv_flow_control_handles_v2
+`, "range_id", "store_id", "total_tracked_tokens")
+
+	h.comment(`-- (Allowing below-raft admission to proceed on [n1,n2,n3].)`)
+	disableWorkQueueGranting.Store(false)
+	h.waitForAllTokensReturned(ctx, 3, 0 /* serverIdx */)
+	h.comment(`
+-- Send queue and flow token metrics from n1. All tokens should be returned.`)
+	h.query(n1, flowSendQueueQueryStr)
+	h.query(n1, flowPerStoreTokenQueryStr, flowPerStoreTokenQueryHeaderStrs...)
+}
+
+func testingMkFlowStream(serverIdx int) kvflowcontrol.Stream {
+	return kvflowcontrol.Stream{
+		StoreID:  roachpb.StoreID(serverIdx + 1),
+		TenantID: roachpb.SystemTenantID,
+	}
+}
+
+// TestFlowControlSendQueueRangeRelocate exercises the send queue formation,
+// prevention and flushing via selective (logical) admission of entries and token
+// return. It also exercises the behavior of the send queue when a range is
+// relocated. See the initial comment for an overview of the test structure.
+func TestFlowControlSendQueueRangeRelocate(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+	// We use three relocate variations (*=lh,^=send_queue):
+	// - [n1*,n2 ,n3^,n4 ,n5] -> [n2 ,n3^,n4 ,n5 ,n6*] (transfer_lease)
+	//   - The leader and leaseholder is relocated.
+	// - [n1*,n2 ,n3^,n4 ,n5] -> [n1*,n2 ,n4 ,n5 ,n6 ]
+	//   - The replica with a send queue is relocated.
+	// - [n1*,n2 ,n3^,n4 ,n5] -> [n1*,n2 ,n3^,n4 ,n6 ]
+	//   - The replica without a send queue is relocated.
+	testutils.RunValues(t, "from", []int{0, 2, 4}, func(t *testing.T, fromIdx int) {
+		testutils.RunTrueAndFalse(t, "transfer_lease", func(t *testing.T, transferLease bool) {
+			const numNodes = 6
+			// The transferLease arg indicates whether the AdminRelocateRange request
+			// will also transfer the lease to the voter which is in the first
+			// position of the target list. We always place n6 in the first position
+			// and pass in the transferLease arg to AdminRelocateRange.
+			fromNode := roachpb.NodeID(fromIdx + 1)
+			toNode := roachpb.NodeID(numNodes)
+			fromServerIdxs := []int{0, 1, 2, 3, 4}
+			toServerIdxs := []int{numNodes - 1}
+			for i := 0; i < numNodes-1; i++ {
+				if i != fromIdx {
+					toServerIdxs = append(toServerIdxs, i)
+				}
+			}
+			var fromString string
+			if fromIdx == 0 {
+				fromString = "leader_store"
+			} else if fromIdx == 2 {
+				fromString = "send_queue_store"
+			} else {
+				fromString = "has_token_store"
+			}
+			if transferLease {
+				fromString += "_transfer_lease"
+			}
+			// If n1 is removing itself from the range, the leaseholder will be
+			// transferred to n6 regardless of the value of transferLease.
+			newLeaseholderIdx := 0
+			if transferLease || fromIdx == 0 {
+				newLeaseholderIdx = 5
+			}
+			newLeaseNode := roachpb.NodeID(newLeaseholderIdx + 1)
+
+			ctx := context.Background()
+			settings := cluster.MakeTestingClusterSettings()
+			kvflowcontrol.Mode.Override(ctx, &settings.SV, kvflowcontrol.ApplyToAll)
+			// We want to exhaust tokens but not overload the test, so we set the limits
+			// lower (8 and 16 MiB default).
+			kvflowcontrol.ElasticTokensPerStream.Override(ctx, &settings.SV, 2<<20)
+			kvflowcontrol.RegularTokensPerStream.Override(ctx, &settings.SV, 4<<20)
+
+			disableWorkQueueGrantingServers := make([]atomic.Bool, numNodes)
+			setTokenReturnEnabled := func(enabled bool, serverIdxs ...int) {
+				for _, serverIdx := range serverIdxs {
+					disableWorkQueueGrantingServers[serverIdx].Store(!enabled)
+				}
+			}
+
+			argsPerServer := make(map[int]base.TestServerArgs)
+			for i := range disableWorkQueueGrantingServers {
+				disableWorkQueueGrantingServers[i].Store(true)
+				argsPerServer[i] = base.TestServerArgs{
+					Settings: settings,
+					Knobs: base.TestingKnobs{
+						Store: &kvserver.StoreTestingKnobs{
+							FlowControlTestingKnobs: &kvflowcontrol.TestingKnobs{
+								UseOnlyForScratchRanges: true,
+								OverrideTokenDeduction: func(tokens kvflowcontrol.Tokens) kvflowcontrol.Tokens {
+									// Deduct every write as 1 MiB, regardless of how large it
+									// actually is.
+									return kvflowcontrol.Tokens(1 << 20)
+								},
+								// We want to test the behavior of the send queue, so we want to
+								// always have up-to-date stats. This ensures that the send queue
+								// stats are always refreshed on each call to
+								// RangeController.HandleRaftEventRaftMuLocked.
+								OverrideAlwaysRefreshSendStreamStats: true,
+							},
+						},
+						AdmissionControl: &admission.TestingKnobs{
+							DisableWorkQueueFastPath: true,
+							DisableWorkQueueGranting: func() bool {
+								idx := i
+								return disableWorkQueueGrantingServers[idx].Load()
+							},
+						},
+					},
+				}
+			}
+
+			tc := testcluster.StartTestCluster(t, numNodes, base.TestClusterArgs{
+				ReplicationMode:   base.ReplicationManual,
+				ServerArgsPerNode: argsPerServer,
+			})
+			defer tc.Stopper().Stop(ctx)
+
+			k := tc.ScratchRange(t)
+			tc.AddVotersOrFatal(t, k, tc.Targets(1, 2, 3, 4)...)
+
+			h := newFlowControlTestHelper(
+				t, tc, "flow_control_integration_v2", /* testdata */
+				kvflowcontrol.V2EnabledWhenLeaderV2Encoding, true, /* isStatic */
+			)
+			h.init(kvflowcontrol.ApplyToAll)
+			defer h.close(fmt.Sprintf("send_queue_range_relocate_from_%s", fromString))
+
+			desc, err := tc.LookupRange(k)
+			require.NoError(t, err)
+			h.enableVerboseRaftMsgLoggingForRange(desc.RangeID)
+			n1 := sqlutils.MakeSQLRunner(tc.ServerConn(0))
+			newLeaseDB := sqlutils.MakeSQLRunner(tc.ServerConn(newLeaseholderIdx))
+			h.waitForConnectedStreams(ctx, desc.RangeID, 5, 0 /* serverIdx */)
+			h.resetV2TokenMetrics(ctx)
+			h.waitForConnectedStreams(ctx, desc.RangeID, 5, 0 /* serverIdx */)
+
+			// Block admission on n3, while allowing every other node to admit.
+			setTokenReturnEnabled(true /* enabled */, 0, 1, 3, 4, 5)
+			setTokenReturnEnabled(false /* enabled */, 2)
+			// Drain the tokens to n3 by blocking admission and issuing the buffer
+			// size of writes to the range.
+			h.put(contextWithTestGeneratedPut(ctx), roachpb.Key(desc.StartKey), 1, admissionpb.NormalPri)
+			h.put(contextWithTestGeneratedPut(ctx), roachpb.Key(desc.StartKey), 1, admissionpb.NormalPri)
+			h.put(contextWithTestGeneratedPut(ctx), roachpb.Key(desc.StartKey), 1, admissionpb.NormalPri)
+			h.put(contextWithTestGeneratedPut(ctx), roachpb.Key(desc.StartKey), 1, admissionpb.NormalPri)
+			h.waitForTotalTrackedTokens(ctx, desc.RangeID, 4<<20 /* 4 MiB */, 0 /* serverIdx */)
+
+			h.comment(`(Sending 1 MiB put request to develop a send queue)`)
+			h.put(contextWithTestGeneratedPut(ctx), roachpb.Key(desc.StartKey), 1, admissionpb.NormalPri)
+			h.comment(`(Sent 1 MiB put request)`)
+			h.waitForTotalTrackedTokens(ctx, desc.RangeID, 4<<20 /* 4 MiB */, 0 /* serverIdx */)
+			h.waitForAllTokensReturnedForStreamsV2(ctx, 0, /* serverIdx */
+				testingMkFlowStream(0), testingMkFlowStream(1),
+				testingMkFlowStream(3), testingMkFlowStream(4))
+			h.waitForSendQueueSize(ctx, desc.RangeID, 1<<20 /* expSize 1 MiB */, 0 /* serverIdx */)
+
+			h.comment(`
+-- Send queue metrics from n1, n3's send queue should have 1 MiB for s3.`)
+			h.query(n1, flowSendQueueQueryStr)
+			h.comment(`
+-- Observe the total tracked tokens per-stream on n1, s3's entries will still
+-- be tracked here.`)
+			h.query(n1, `
+  SELECT range_id, store_id, crdb_internal.humanize_bytes(total_tracked_tokens::INT8)
+    FROM crdb_internal.kv_flow_control_handles_v2
+`, "range_id", "store_id", "total_tracked_tokens")
+			h.comment(`
+-- Per-store tokens available from n1, these should reflect the lack of tokens 
+-- for s3.`)
+			h.query(n1, flowPerStoreTokenQueryStr, flowPerStoreTokenQueryHeaderStrs...)
+
+			beforeString := fmt.Sprintf("%v", fromServerIdxs)
+			afterString := fmt.Sprintf("%v", toServerIdxs)
+
+			h.comment(fmt.Sprintf(`
+-- Issuing RelocateRange:
+--   before=%s
+--   after =%s
+-- Transferring the lease: %v.`, beforeString, afterString, transferLease))
+			testutils.SucceedsSoon(t, func() error {
+				if err := tc.Servers[2].DB().
+					AdminRelocateRange(
+						context.Background(),
+						desc.StartKey.AsRawKey(),
+						tc.Targets(toServerIdxs...),
+						nil,           /* nonVoterTargets */
+						transferLease, /* transferLeaseToFirstVoter */
+					); err != nil {
+					return err
+				}
+				var err error
+				desc, err = tc.LookupRange(k)
+				if err != nil {
+					return err
+				}
+				rset := desc.Replicas()
+				if fullDescs := rset.VoterFullAndNonVoterDescriptors(); len(fullDescs) != 5 {
+					return errors.Errorf(
+						"expected 5 voters, got %v (replica_set=%v)", fullDescs, rset)
+				}
+				if rset.HasReplicaOnNode(fromNode) {
+					return errors.Errorf(
+						"expected no replica on node %v (replica_set=%v)", fromNode, rset)
+				}
+				if !rset.HasReplicaOnNode(toNode) {
+					return errors.Errorf(
+						"expected replica on node 6 (replica_set=%v)", rset)
+				}
+				leaseHolder, err := tc.FindRangeLeaseHolder(desc, nil)
+				if err != nil {
+					return err
+				}
+				expLeaseTarget := tc.Target(newLeaseholderIdx)
+				if !leaseHolder.Equal(expLeaseTarget) {
+					return errors.Errorf(
+						"expected leaseholder to be on %v found %v (replica_set=%v)",
+						expLeaseTarget, leaseHolder, rset)
+				}
+				return nil
+			})
+
+			h.waitForConnectedStreams(ctx, desc.RangeID, 5, newLeaseholderIdx)
+			h.comment(`(Sending 1 MiB put request to the relocated range)`)
+			h.put(contextWithTestGeneratedPut(ctx), k, 1, admissionpb.NormalPri, newLeaseholderIdx)
+			h.comment(`(Sent 1 MiB put request to the relocated range)`)
+
+			h.waitForAllTokensReturnedForStreamsV2(ctx, 0, /* serverIdx */
+				testingMkFlowStream(0), testingMkFlowStream(1),
+				testingMkFlowStream(3), testingMkFlowStream(4))
+
+			toStreams := make([]kvflowcontrol.Stream, 0, len(toServerIdxs))
+			for _, toServerIdx := range toServerIdxs {
+				if toServerIdx != 2 /* send queue server */ {
+					toStreams = append(toStreams, testingMkFlowStream(toServerIdx))
+				}
+			}
+			h.waitForAllTokensReturnedForStreamsV2(ctx, newLeaseholderIdx, toStreams...)
+
+			h.comment(`-- Observe the total tracked tokens per-stream on n1.`)
+			h.query(n1, `
+  SELECT range_id, store_id, crdb_internal.humanize_bytes(total_tracked_tokens::INT8)
+    FROM crdb_internal.kv_flow_control_handles_v2
+`, "range_id", "store_id", "total_tracked_tokens")
+
+			if newLeaseholderIdx != 0 {
+				// Avoid double printing if the lease hasn't moved.
+				h.comment(fmt.Sprintf(`
+-- Observe the total tracked tokens per-stream on new leaseholder n%v.`, newLeaseNode))
+				h.query(n1, `
+  SELECT range_id, store_id, crdb_internal.humanize_bytes(total_tracked_tokens::INT8)
+    FROM crdb_internal.kv_flow_control_handles_v2
+`, "range_id", "store_id", "total_tracked_tokens")
+
+			}
+
+			// Allow admission to proceed on n3 and wait for all tokens to be returned.
+			h.comment(`-- (Allowing below-raft admission to proceed on n3.)`)
+			setTokenReturnEnabled(true /* enabled */, 2)
+			h.waitForAllTokensReturned(ctx, 6 /* expStreamCount */, 0 /* serverIdx */)
+			if transferLease && fromIdx != 0 {
+				// When the lease is transferred first, the leaseholder is relocated to
+				// n6 after the fromNode is removed. In this case, we expect the
+				// leaseholder will have only 5 streams, because it will have never
+				// seen s3's stream as its replica was already removed from the range.
+				h.waitForAllTokensReturned(ctx, 5 /* expStreamCount */, newLeaseholderIdx)
+			} else {
+				h.waitForAllTokensReturned(ctx, 6 /* expStreamCount */, newLeaseholderIdx)
+			}
+
+			h.comment(`
+-- Send queue and flow token metrics from n1. All tokens should be returned.`)
+			h.query(n1, flowSendQueueQueryStr)
+			h.query(n1, flowPerStoreTokenQueryStr, flowPerStoreTokenQueryHeaderStrs...)
+			h.comment(fmt.Sprintf(`
+-- Send queue and flow token metrics from leaseholder n%v.
+-- All tokens should be returned.`, newLeaseNode))
+			h.query(newLeaseDB, flowSendQueueQueryStr)
+			h.query(newLeaseDB, flowPerStoreTokenQueryStr, flowPerStoreTokenQueryHeaderStrs...)
+		})
+	})
+}
+
+func TestFlowControlSendQueueRangeMigrate(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	ctx := context.Background()
+	const numNodes = 3
+	// We're going to be transitioning from startV to endV. Think a cluster of
+	// binaries running vX, but with active version vX-1.
+	startV := clusterversion.PreviousRelease.Version()
+	endV := clusterversion.Latest.Version()
+	settings := cluster.MakeTestingClusterSettingsWithVersions(endV, startV, false)
+	kvflowcontrol.Mode.Override(ctx, &settings.SV, kvflowcontrol.ApplyToAll)
+	// We want to exhaust tokens but not overload the test, so we set the limits
+	// lower (8 and 16 MiB default).
+	kvflowcontrol.ElasticTokensPerStream.Override(ctx, &settings.SV, 2<<20)
+	kvflowcontrol.RegularTokensPerStream.Override(ctx, &settings.SV, 4<<20)
+	disableWorkQueueGrantingServers := make([]atomic.Bool, numNodes)
+	setTokenReturnEnabled := func(enabled bool, serverIdxs ...int) {
+		for _, serverIdx := range serverIdxs {
+			disableWorkQueueGrantingServers[serverIdx].Store(!enabled)
+		}
+	}
+
+	argsPerServer := make(map[int]base.TestServerArgs)
+	for i := range disableWorkQueueGrantingServers {
+		disableWorkQueueGrantingServers[i].Store(true)
+		argsPerServer[i] = base.TestServerArgs{
+			Settings: settings,
+			Knobs: base.TestingKnobs{
+				Server: &server.TestingKnobs{
+					ClusterVersionOverride:         startV,
+					DisableAutomaticVersionUpgrade: make(chan struct{}),
+				},
+				Store: &kvserver.StoreTestingKnobs{
+					EvalKnobs: kvserverbase.BatchEvalTestingKnobs{
+						// Because we are migrating from a version (currently) prior to the
+						// range force flush key version gate, we won't trigger the force
+						// flush via migrate until we're on the endV, which defeats the
+						// purpose of this test. We override the behavior here to allow the
+						// force flush to be triggered on the startV from a Migrate
+						// request.
+						OverrideDoTimelyApplicationToAllReplicas: true,
+					},
+					FlowControlTestingKnobs: &kvflowcontrol.TestingKnobs{
+						OverrideV2EnabledWhenLeaderLevel: func() kvflowcontrol.V2EnabledWhenLeaderLevel {
+							return kvflowcontrol.V2EnabledWhenLeaderV2Encoding
+						},
+						UseOnlyForScratchRanges: true,
+						OverrideTokenDeduction: func(tokens kvflowcontrol.Tokens) kvflowcontrol.Tokens {
+							// Deduct every write as 1 MiB, regardless of how large it
+							// actually is.
+							return kvflowcontrol.Tokens(1 << 20)
+						},
+						// We want to test the behavior of the send queue, so we want to
+						// always have up-to-date stats. This ensures that the send queue
+						// stats are always refreshed on each call to
+						// RangeController.HandleRaftEventRaftMuLocked.
+						OverrideAlwaysRefreshSendStreamStats: true,
+					},
+				},
+				AdmissionControl: &admission.TestingKnobs{
+					DisableWorkQueueFastPath: true,
+					DisableWorkQueueGranting: func() bool {
+						idx := i
+						return disableWorkQueueGrantingServers[idx].Load()
+					},
+				},
+			},
+		}
+	}
+
+	tc := testcluster.StartTestCluster(t, numNodes, base.TestClusterArgs{
+		ReplicationMode:   base.ReplicationManual,
+		ServerArgsPerNode: argsPerServer,
+	})
+	defer tc.Stopper().Stop(ctx)
+
+	k := tc.ScratchRange(t)
+	tc.AddVotersOrFatal(t, k, tc.Targets(1, 2)...)
+
+	h := newFlowControlTestHelper(
+		t, tc, "flow_control_integration_v2", /* testdata */
+		kvflowcontrol.V2EnabledWhenLeaderV2Encoding, true, /* isStatic */
+	)
+	h.init(kvflowcontrol.ApplyToAll)
+	defer h.close("send_queue_range_migrate")
+
+	desc, err := tc.LookupRange(k)
+	require.NoError(t, err)
+	h.enableVerboseRaftMsgLoggingForRange(desc.RangeID)
+	n1 := sqlutils.MakeSQLRunner(tc.ServerConn(0))
+	h.waitForConnectedStreams(ctx, desc.RangeID, 3, 0 /* serverIdx */)
+	h.resetV2TokenMetrics(ctx)
+	h.waitForConnectedStreams(ctx, desc.RangeID, 3, 0 /* serverIdx */)
+
+	store := tc.GetFirstStoreFromServer(t, 0)
+	assertVersion := func(expV roachpb.Version) error {
+		repl, err := store.GetReplica(desc.RangeID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if gotV := repl.Version(); gotV != expV {
+			return errors.Errorf("expected in-memory version %s, got %s", expV, gotV)
+		}
+
+		sl := stateloader.Make(desc.RangeID)
+		persistedV, err := sl.LoadVersion(ctx, store.TODOEngine())
+		if err != nil {
+			return err
+		}
+		if persistedV != expV {
+			return errors.Errorf("expected persisted version %s, got %s", expV, persistedV)
+		}
+		return nil
+	}
+
+	require.NoError(t, assertVersion(startV))
+
+	migrated := false
+	unregister := batcheval.TestingRegisterMigrationInterceptor(endV, func() {
+		migrated = true
+	})
+	defer unregister()
+
+	h.comment(`
+-- We will exhaust the tokens across all streams while admission is blocked on
+-- n3, using a single 4 MiB (deduction, the write itself is small) write. Then,
+-- we will write a 1 MiB put to the range, migrate the range, and write a 1 MiB
+-- put to the migrated range. We expect that the migration will trigger a force
+-- flush of the send queue.`)
+	// Block admission on n3, while allowing every other node to admit.
+	setTokenReturnEnabled(true /* enabled */, 0, 1)
+	setTokenReturnEnabled(false /* enabled */, 2)
+	// Drain the tokens to n3 by blocking admission and issuing the buffer
+	// size of writes to the range.
+	h.put(ctx, roachpb.Key(desc.StartKey), 1, admissionpb.NormalPri)
+	h.put(ctx, roachpb.Key(desc.StartKey), 1, admissionpb.NormalPri)
+	h.put(ctx, roachpb.Key(desc.StartKey), 1, admissionpb.NormalPri)
+	h.put(ctx, roachpb.Key(desc.StartKey), 1, admissionpb.NormalPri)
+	h.waitForTotalTrackedTokens(ctx, desc.RangeID, 4<<20 /* 4 MiB */, 0 /* serverIdx */)
+
+	h.comment(`(Sending 1 MiB put request to develop a send queue)`)
+	h.put(ctx, roachpb.Key(desc.StartKey), 1, admissionpb.NormalPri)
+	h.comment(`(Sent 1 MiB put request)`)
+	h.waitForTotalTrackedTokens(ctx, desc.RangeID, 4<<20 /* 4 MiB */, 0 /* serverIdx */)
+	h.waitForAllTokensReturnedForStreamsV2(ctx, 0, /* serverIdx */
+		testingMkFlowStream(0), testingMkFlowStream(1))
+	h.waitForSendQueueSize(ctx, desc.RangeID, 1<<20 /* expSize 1 MiB */, 0 /* serverIdx */)
+
+	h.comment(`
+-- Send queue metrics from n1, n3's send queue should have 1 MiB for s3.`)
+	h.query(n1, flowSendQueueQueryStr)
+	h.comment(`
+-- Observe the total tracked tokens per-stream on n1, s3's entries will still
+-- be tracked here.`)
+	h.query(n1, `
+  SELECT range_id, store_id, crdb_internal.humanize_bytes(total_tracked_tokens::INT8)
+    FROM crdb_internal.kv_flow_control_handles_v2
+`, "range_id", "store_id", "total_tracked_tokens")
+	h.comment(`
+-- Per-store tokens available from n1, these should reflect the lack of tokens 
+-- for s3.`)
+	h.query(n1, flowPerStoreTokenQueryStr, flowPerStoreTokenQueryHeaderStrs...)
+
+	h.comment(`-- (Issuing MigrateRequest to range)`)
+	req := &kvpb.MigrateRequest{
+		RequestHeader: kvpb.RequestHeader{
+			Key:    desc.StartKey.AsRawKey(),
+			EndKey: desc.EndKey.AsRawKey(),
+		},
+		Version: endV,
+	}
+	kvDB := tc.Servers[0].DB()
+	require.NoError(t, func() error {
+		if _, pErr := kv.SendWrappedWith(ctx, kvDB.GetFactory().NonTransactionalSender(), kvpb.Header{RangeID: desc.RangeID}, req); pErr != nil {
+			return pErr.GoError()
+		}
+		if !migrated {
+			return errors.Errorf("expected migration interceptor to have been called")
+		}
+		return assertVersion(endV)
+	}())
+
+	h.waitForConnectedStreams(ctx, desc.RangeID, 3, 0 /* serverIdx */)
+	h.waitForSendQueueSize(ctx, desc.RangeID, 0 /* expSize */, 0 /* serverIdx */)
+	h.comment(`
+-- Send queue and flow token metrics from n1 post-migrate. The migrate should
+-- have triggered a force flush of the send queue.`)
+	h.query(n1, flowSendQueueQueryStr)
+	h.query(n1, flowPerStoreTokenQueryStr, flowPerStoreTokenQueryHeaderStrs...)
+
+	h.comment(`(Sending 1 MiB put request to the migrated range)`)
+	h.put(ctx, roachpb.Key(desc.StartKey), 1, admissionpb.NormalPri)
+	h.comment(`(Sent 1 MiB put request to the migrated range)`)
+	h.waitForSendQueueSize(ctx, desc.RangeID, 1<<20 /* expSize 1 MiB */, 0 /* serverIdx */)
+	h.waitForAllTokensReturnedForStreamsV2(ctx, 0, /* serverIdx */
+		testingMkFlowStream(0), testingMkFlowStream(1))
+
+	h.comment(`
+-- Send queue and flow token metrics from n1 post-migrate and post 1 MiB put.
+-- We expect to see the send queue develop for s3 again.`)
+	h.query(n1, flowSendQueueQueryStr)
+	h.query(n1, flowPerStoreTokenQueryStr, flowPerStoreTokenQueryHeaderStrs...)
+
+	h.comment(`-- (Allowing below-raft admission to proceed on n3.)`)
+	setTokenReturnEnabled(true /* enabled */, 2)
+	h.waitForAllTokensReturned(ctx, 3, 0 /* serverIdx */)
+	h.waitForSendQueueSize(ctx, desc.RangeID, 0 /* expSize 0 MiB */, 0 /* serverIdx */)
+
 	h.comment(`
 -- Send queue and flow token metrics from n1. All tokens should be returned.`)
 	h.query(n1, flowSendQueueQueryStr)

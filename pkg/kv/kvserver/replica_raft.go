@@ -27,7 +27,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/liveness/livenesspb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/logstore"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/raftlog"
-	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/stateloader"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/uncertainty"
 	"github.com/cockroachdb/cockroach/pkg/raft"
 	"github.com/cockroachdb/cockroach/pkg/raft/raftpb"
@@ -35,7 +34,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/storage"
-	"github.com/cockroachdb/cockroach/pkg/storage/fs"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/admission/admissionpb"
 	"github.com/cockroachdb/cockroach/pkg/util/buildutil"
@@ -43,7 +41,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/metamorphic"
 	"github.com/cockroachdb/cockroach/pkg/util/quotapool"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
@@ -53,30 +50,9 @@ import (
 	"github.com/cockroachdb/redact"
 )
 
-var (
-	// raftLogTruncationClearRangeThreshold is the number of entries at which Raft
-	// log truncation uses a Pebble range tombstone rather than point deletes. It
-	// is set high enough to avoid writing too many range tombstones to Pebble,
-	// but low enough that we don't do too many point deletes either (in
-	// particular, we don't want to overflow the Pebble write batch).
-	//
-	// In the steady state, Raft log truncation occurs when RaftLogQueueStaleSize
-	// (64 KB) or RaftLogQueueStaleThreshold (100 entries) is exceeded, so
-	// truncations are generally small. If followers are lagging, we let the log
-	// grow to RaftLogTruncationThreshold (16 MB) before truncating.
-	//
-	// 100k was chosen because it is unlikely to be hit in most common cases,
-	// keeping the number of range tombstones low, but will trigger when Raft logs
-	// have grown abnormally large. RaftLogTruncationThreshold will typically not
-	// trigger it, unless the average log entry is <= 160 bytes. The key size is
-	// ~16 bytes, so Pebble point deletion batches will be bounded at ~1.6MB.
-	raftLogTruncationClearRangeThreshold = kvpb.RaftIndex(metamorphic.ConstantWithTestRange(
-		"raft-log-truncation-clearrange-threshold", 100000 /* default */, 1 /* min */, 1e6 /* max */))
-
-	// raftDisableLeaderFollowsLeaseholder disables lease/leader colocation.
-	raftDisableLeaderFollowsLeaseholder = envutil.EnvOrDefaultBool(
-		"COCKROACH_DISABLE_LEADER_FOLLOWS_LEASEHOLDER", false)
-)
+// raftDisableLeaderFollowsLeaseholder disables lease/leader collocation.
+var raftDisableLeaderFollowsLeaseholder = envutil.EnvOrDefaultBool(
+	"COCKROACH_DISABLE_LEADER_FOLLOWS_LEASEHOLDER", false)
 
 // evalAndPropose prepares the necessary pending command struct and initializes
 // a client command ID if one hasn't been. A verified lease is supplied as a
@@ -914,13 +890,9 @@ func (r *Replica) handleRaftReadyRaftMuLocked(
 	replicaStateInfoMap := r.raftMu.replicaStateScratchForFlowControl
 	var raftNodeBasicState replica_rac2.RaftNodeBasicState
 	var logSnapshot raft.LogSnapshot
+
 	r.mu.Lock()
 	rac2ModeForReady := r.mu.currentRACv2Mode
-	state := logstore.RaftState{ // used for append below
-		LastIndex: r.shMu.lastIndexNotDurable,
-		LastTerm:  r.shMu.lastTermNotDurable,
-		ByteSize:  r.shMu.raftLogSize,
-	}
 	leaderID := r.mu.leaderID
 	lastLeaderID := leaderID
 	err := r.withRaftGroupLocked(func(raftGroup *raft.RawNode) (bool, error) {
@@ -1078,6 +1050,8 @@ func (r *Replica) handleRaftReadyRaftMuLocked(
 	// Grab the known leaseholder before applying to the state machine.
 	startingLeaseholderID := r.shMu.state.Lease.Replica.ReplicaID
 	refreshReason := noReason
+
+	state := r.asLogStorage().stateRaftMuLocked()
 	if hasMsg(msgStorageAppend) {
 		app := logstore.MakeMsgStorageAppend(msgStorageAppend)
 		cb := (*replicaSyncCallback)(r)
@@ -1156,14 +1130,11 @@ func (r *Replica) handleRaftReadyRaftMuLocked(
 			stats.tSnapEnd = crtime.NowMono()
 			stats.snap.applied = true
 
-			// lastIndexNotDurable, lastTermNotDurable and raftLogSize were updated in
-			// applySnapshot, but we also want to make sure we reflect these changes
-			// in the local variables we're tracking here.
-			state = logstore.RaftState{
-				LastIndex: r.shMu.lastIndexNotDurable,
-				LastTerm:  r.shMu.lastTermNotDurable,
-				ByteSize:  r.shMu.raftLogSize,
-			}
+			// The raft log state was updated in applySnapshot, but we also want to
+			// reflect these changes in the state variable here.
+			// TODO(pav-kv): this is unnecessary. We only do it because there is an
+			// unconditional storing of this state below. Avoid doing it twice.
+			state = r.asLogStorage().stateRaftMuLocked()
 
 			// We refresh pending commands after applying a snapshot because this
 			// replica may have been temporarily partitioned from the Raft group and
@@ -1181,26 +1152,6 @@ func (r *Replica) handleRaftReadyRaftMuLocked(
 			// TODO(pavelkalinnikov): find a way to move it to storeEntries.
 			if app.Commit != 0 && !r.IsInitialized() {
 				log.Fatalf(ctx, "setting non-zero HardState.Commit on uninitialized replica %s", r)
-			}
-			// TODO(pavelkalinnikov): construct and store this in Replica.
-			// TODO(pavelkalinnikov): fields like raftEntryCache are the same across all
-			// ranges, so can be passed to LogStore methods instead of being stored in it.
-			s := logstore.LogStore{
-				RangeID:     r.RangeID,
-				Engine:      r.store.TODOEngine(),
-				Sideload:    r.raftMu.sideloaded,
-				StateLoader: r.raftMu.stateLoader.StateLoader,
-				// NOTE: we use the same SyncWaiter callback loop for all raft log
-				// writes performed by a given range. This ensures that callbacks are
-				// processed in order.
-				SyncWaiter: r.store.syncWaiters[int(r.RangeID)%len(r.store.syncWaiters)],
-				EntryCache: r.store.raftEntryCache,
-				Settings:   r.store.cfg.Settings,
-				Metrics: logstore.Metrics{
-					RaftLogCommitLatency: r.store.metrics.RaftLogCommitLatency,
-				},
-				DisableSyncLogWriteToss: buildutil.CrdbTestBuild &&
-					r.store.TestingKnobs().DisableSyncLogWriteToss,
 			}
 			// TODO(pav-kv): make this branch unconditional.
 			if r.IsInitialized() && r.store.cfg.KVAdmissionController != nil {
@@ -1222,7 +1173,7 @@ func (r *Replica) handleRaftReadyRaftMuLocked(
 			}
 
 			r.mu.raftTracer.MaybeTrace(msgStorageAppend)
-			if state, err = s.StoreEntries(ctx, state, app, cb, &stats.append); err != nil {
+			if state, err = r.asLogStorage().appendRaftMuLocked(ctx, app, &stats.append); err != nil {
 				return stats, errors.Wrap(err, "while storing log entries")
 			}
 		}
@@ -1231,10 +1182,7 @@ func (r *Replica) handleRaftReadyRaftMuLocked(
 	// Update protected state - last index, last term, raft log size, and raft
 	// leader ID.
 	r.mu.Lock()
-	// TODO(pavelkalinnikov): put logstore.RaftState to r.mu directly.
-	r.shMu.lastIndexNotDurable = state.LastIndex
-	r.shMu.lastTermNotDurable = state.LastTerm
-	r.shMu.raftLogSize = state.ByteSize
+	r.asLogStorage().updateStateRaftMuLockedMuLocked(state)
 	var becameLeader bool
 	if r.mu.leaderID != leaderID {
 		r.mu.leaderID = leaderID
@@ -2969,85 +2917,13 @@ func (r *Replica) acquireMergeLock(
 // snapshot.
 func handleTruncatedStateBelowRaftPreApply(
 	ctx context.Context,
-	currentTruncatedState, suggestedTruncatedState *kvserverpb.RaftTruncatedState,
-	loader stateloader.StateLoader,
+	currentTruncatedState kvserverpb.RaftTruncatedState,
+	suggestedTruncatedState *kvserverpb.RaftTruncatedState,
+	loader logstore.StateLoader,
 	readWriter storage.ReadWriter,
 ) (_apply bool, _ error) {
-	if suggestedTruncatedState.Index <= currentTruncatedState.Index {
-		// The suggested truncated state moves us backwards; instruct the
-		// caller to not update the in-memory state.
-		return false, nil
-	}
-
-	// Truncate the Raft log from the entry after the previous
-	// truncation index to the new truncation index. This is performed
-	// atomically with the raft command application so that the
-	// TruncatedState index is always consistent with the state of the
-	// Raft log itself.
-	prefixBuf := &loader.RangeIDPrefixBuf
-	numTruncatedEntries := suggestedTruncatedState.Index - currentTruncatedState.Index
-	if numTruncatedEntries >= raftLogTruncationClearRangeThreshold {
-		start := prefixBuf.RaftLogKey(currentTruncatedState.Index + 1).Clone()
-		end := prefixBuf.RaftLogKey(suggestedTruncatedState.Index + 1).Clone() // end is exclusive
-		if err := readWriter.ClearRawRange(start, end, true, false); err != nil {
-			return false, errors.Wrapf(err,
-				"unable to clear truncated Raft entries for %+v between indexes %d-%d",
-				suggestedTruncatedState, currentTruncatedState.Index+1, suggestedTruncatedState.Index+1)
-		}
-	} else {
-		// NB: RangeIDPrefixBufs have sufficient capacity (32 bytes) to
-		// avoid allocating when constructing Raft log keys (16 bytes).
-		prefix := prefixBuf.RaftLogPrefix()
-		for idx := currentTruncatedState.Index + 1; idx <= suggestedTruncatedState.Index; idx++ {
-			if err := readWriter.ClearUnversioned(
-				keys.RaftLogKeyFromPrefix(prefix, idx),
-				storage.ClearOptions{},
-			); err != nil {
-				return false, errors.Wrapf(err, "unable to clear truncated Raft entries for %+v at index %d",
-					suggestedTruncatedState, idx)
-			}
-		}
-	}
-
-	// The suggested truncated state moves us forward; apply it and tell
-	// the caller as much.
-	if err := storage.MVCCPutProto(
-		ctx,
-		readWriter,
-		prefixBuf.RaftTruncatedStateKey(),
-		hlc.Timestamp{},
-		suggestedTruncatedState,
-		storage.MVCCWriteOptions{Category: fs.ReplicationReadCategory},
-	); err != nil {
-		return false, errors.Wrap(err, "unable to write RaftTruncatedState")
-	}
-
-	return true, nil
-}
-
-// ComputeRaftLogSize computes the size (in bytes) of the Raft log from the
-// storage engine. This will iterate over the Raft log and sideloaded files, so
-// depending on the size of these it can be mildly to extremely expensive and
-// thus should not be called frequently.
-func ComputeRaftLogSize(
-	ctx context.Context,
-	rangeID roachpb.RangeID,
-	reader storage.Reader,
-	sideloaded logstore.SideloadStorage,
-) (int64, error) {
-	prefix := keys.RaftLogPrefix(rangeID)
-	prefixEnd := prefix.PrefixEnd()
-	ms, err := storage.ComputeStats(ctx, reader, prefix, prefixEnd, 0 /* nowNanos */)
-	if err != nil {
-		return 0, err
-	}
-	// The remaining bytes if one were to truncate [0, 0) gives us the total
-	// number of bytes in sideloaded files.
-	_, totalSideloaded, err := sideloaded.BytesIfTruncatedFromTo(ctx, 0, 0)
-	if err != nil {
-		return 0, err
-	}
-	return ms.SysBytes + totalSideloaded, nil
+	return logstore.Compact(ctx, currentTruncatedState, suggestedTruncatedState,
+		loader, readWriter)
 }
 
 // shouldCampaignAfterConfChange returns true if the current replica should

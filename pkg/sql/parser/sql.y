@@ -989,7 +989,7 @@ func (u *sqlSymUnion) triggerForEach() tree.TriggerForEach {
 %token <str> LABEL LANGUAGE LAST LATERAL LATEST LC_CTYPE LC_COLLATE
 %token <str> LEADING LEASE LEAST LEAKPROOF LEFT LESS LEVEL LIKE LIMIT
 %token <str> LINESTRING LINESTRINGM LINESTRINGZ LINESTRINGZM
-%token <str> LIST LOCAL LOCALITY LOCALTIME LOCALTIMESTAMP LOCKED LOGICAL LOGIN LOOKUP LOW LSHIFT
+%token <str> LIST LOCAL LOCALITY LOCALTIME LOCALTIMESTAMP LOCKED LOGICAL LOGICALLY LOGIN LOOKUP LOW LSHIFT
 
 %token <str> MATCH MATERIALIZED MERGE MINVALUE MAXVALUE METHOD MINUTE MODIFYCLUSTERSETTING MODIFYSQLCLUSTERSETTING MODE MONTH MOVE
 %token <str> MULTILINESTRING MULTILINESTRINGM MULTILINESTRINGZ MULTILINESTRINGZM
@@ -1015,7 +1015,7 @@ func (u *sqlSymUnion) triggerForEach() tree.TriggerForEach {
 
 %token <str> RANGE RANGES READ REAL REASON REASSIGN RECURSIVE RECURRING REDACT REF REFERENCES REFERENCING REFRESH
 %token <str> REGCLASS REGION REGIONAL REGIONS REGNAMESPACE REGPROC REGPROCEDURE REGROLE REGTYPE REINDEX
-%token <str> RELATIVE RELOCATE REMOVE_PATH REMOVE_REGIONS RENAME REPEATABLE REPLACE REPLICATION
+%token <str> RELATIVE RELOCATE REMOVE_PATH REMOVE_REGIONS RENAME REPEATABLE REPLACE REPLICATED REPLICATION
 %token <str> RELEASE RESET RESTART RESTORE RESTRICT RESTRICTED RESUME RETENTION RETURNING RETURN RETURNS RETRY REVISION_HISTORY
 %token <str> REVOKE RIGHT ROLE ROLES ROLLBACK ROLLUP ROUTINES ROW ROWS RSHIFT RULE RUNNING
 
@@ -1030,7 +1030,7 @@ func (u *sqlSymUnion) triggerForEach() tree.TriggerForEach {
 
 %token <str> TABLE TABLES TABLESPACE TEMP TEMPLATE TEMPORARY TENANT TENANT_NAME TENANTS TESTING_RELOCATE TEXT THEN
 %token <str> TIES TIME TIMETZ TIMESTAMP TIMESTAMPTZ TO THROTTLING TRAILING TRACE
-%token <str> TRANSACTION TRANSACTIONS TRANSFER TRANSFORM TREAT TRIGGER TRIM TRUE
+%token <str> TRANSACTION TRANSACTIONS TRANSFER TRANSFORM TREAT TRIGGER TRIGGERS TRIM TRUE
 %token <str> TRUNCATE TRUSTED TYPE TYPES
 %token <str> TRACING
 
@@ -1287,7 +1287,6 @@ func (u *sqlSymUnion) triggerForEach() tree.TriggerForEach {
 %type <tree.Statement> drop_schedule_stmt
 %type <tree.Statement> restore_stmt
 %type <tree.StringOrPlaceholderOptList> string_or_placeholder_opt_list
-%type <[]tree.StringOrPlaceholderOptList> list_of_string_or_placeholder_opt_list
 %type <tree.Statement> revoke_stmt
 %type <tree.Statement> refresh_stmt
 %type <*tree.Select> select_stmt
@@ -1311,6 +1310,7 @@ func (u *sqlSymUnion) triggerForEach() tree.TriggerForEach {
 %type <tree.Statement> show_columns_stmt
 %type <tree.Statement> show_commit_timestamp_stmt
 %type <tree.Statement> show_constraints_stmt
+%type <tree.Statement> show_triggers_stmt
 %type <tree.Statement> show_create_stmt
 %type <tree.ShowCreateFormatOption> opt_show_create_format_options
 %type <tree.Statement> show_create_schedules_stmt
@@ -3359,7 +3359,6 @@ backup_stmt:
     $$.val = &tree.Backup{
       Targets: $2.backupTargetListPtr(),
       To: $6.stringOrPlaceholderOptList(),
-      Nested: true,
       AppendToLatest: false,
       Subdir: $4.expr(),
       AsOf: $7.asOfClause(),
@@ -3371,7 +3370,6 @@ backup_stmt:
     $$.val = &tree.Backup{
       Targets: $2.backupTargetListPtr(),
       To: $4.stringOrPlaceholderOptList(),
-      Nested: true,
       AsOf: $5.asOfClause(),
       Options: *$6.backupOptions(),
     }
@@ -3381,7 +3379,6 @@ backup_stmt:
     $$.val = &tree.Backup{
       Targets: $2.backupTargetListPtr(),
       To: $6.stringOrPlaceholderOptList(),
-      Nested: true,
       AppendToLatest: true,
       AsOf: $7.asOfClause(),
       Options: *$8.backupOptions(),
@@ -3819,12 +3816,12 @@ restore_stmt:
     setErr(sqllex, errors.New("The `RESTORE FROM <backupURI>` syntax is no longer supported. Please use `RESTORE FROM <subdirectory> IN <collectionURI>`."))
     return helpWith(sqllex, "RESTORE")
   }
-| RESTORE FROM string_or_placeholder IN list_of_string_or_placeholder_opt_list opt_as_of_clause opt_with_restore_options
+| RESTORE FROM string_or_placeholder IN string_or_placeholder_opt_list opt_as_of_clause opt_with_restore_options
   {
     $$.val = &tree.Restore{
     DescriptorCoverage: tree.AllDescriptors,
 		Subdir: $3.expr(),
-		From: $5.listOfStringOrPlaceholderOptList(),
+		From: $5.stringOrPlaceholderOptList(),
 		AsOf: $6.asOfClause(),
 		Options: *($7.restoreOptions()),
     }
@@ -3834,12 +3831,12 @@ restore_stmt:
     setErr(sqllex, errors.New("The `RESTORE <targets> FROM <backupURI>` syntax is no longer supported. Please use `RESTORE <targets> FROM <subdirectory> IN <collectionURI>`."))
     return helpWith(sqllex, "RESTORE")
   }
-| RESTORE backup_targets FROM string_or_placeholder IN list_of_string_or_placeholder_opt_list opt_as_of_clause opt_with_restore_options
+| RESTORE backup_targets FROM string_or_placeholder IN string_or_placeholder_opt_list opt_as_of_clause opt_with_restore_options
   {
     $$.val = &tree.Restore{
       Targets: $2.backupTargetList(),
       Subdir: $4.expr(),
-      From: $6.listOfStringOrPlaceholderOptList(),
+      From: $6.stringOrPlaceholderOptList(),
       AsOf: $7.asOfClause(),
       Options: *($8.restoreOptions()),
     }
@@ -3849,12 +3846,12 @@ restore_stmt:
     setErr(sqllex, errors.New("The `RESTORE <targets> FROM <backupURI>` syntax is no longer supported. Please use `RESTORE <targets> FROM <subdirectory> IN <collectionURI>`."))
     return helpWith(sqllex, "RESTORE")
   }
-| RESTORE SYSTEM USERS FROM string_or_placeholder IN list_of_string_or_placeholder_opt_list opt_as_of_clause opt_with_restore_options
+| RESTORE SYSTEM USERS FROM string_or_placeholder IN string_or_placeholder_opt_list opt_as_of_clause opt_with_restore_options
   {
     $$.val = &tree.Restore{
       DescriptorCoverage: tree.SystemUsers,
       Subdir: $5.expr(),
-      From: $7.listOfStringOrPlaceholderOptList(),
+      From: $7.stringOrPlaceholderOptList(),
       AsOf: $8.asOfClause(),
       Options: *($9.restoreOptions()),
     }
@@ -3869,16 +3866,6 @@ string_or_placeholder_opt_list:
 | '(' string_or_placeholder_list ')'
   {
     $$.val = tree.StringOrPlaceholderOptList($2.exprs())
-  }
-
-list_of_string_or_placeholder_opt_list:
-  string_or_placeholder_opt_list
-  {
-    $$.val = []tree.StringOrPlaceholderOptList{$1.stringOrPlaceholderOptList()}
-  }
-| list_of_string_or_placeholder_opt_list ',' string_or_placeholder_opt_list
-  {
-    $$.val = append($1.listOfStringOrPlaceholderOptList(), $3.stringOrPlaceholderOptList())
   }
 
 // Optional restore options.
@@ -4630,6 +4617,16 @@ create_logical_replication_stream_stmt:
       Into: $10.logicalReplicationResources(),
       Options: *$11.logicalReplicationOptions(),
     }
+  }
+| CREATE LOGICALLY REPLICATED logical_replication_resources FROM logical_replication_resources ON string_or_placeholder opt_logical_replication_options
+  {
+    $$.val = &tree.CreateLogicalReplicationStream{
+      Into: $4.logicalReplicationResources(),
+      From: $6.logicalReplicationResources(),
+      PGURL: $8.expr(),
+      CreateTable: true,
+      Options: *$9.logicalReplicationOptions(),
+    } 
   }
 | CREATE LOGICAL REPLICATION STREAM error // SHOW HELP: CREATE LOGICAL REPLICATION STREAM
 
@@ -7808,7 +7805,7 @@ zone_value:
 // %Help: SHOW
 // %Category: Group
 // %Text:
-// SHOW BACKUP, SHOW CLUSTER SETTING, SHOW COLUMNS, SHOW CONSTRAINTS,
+// SHOW BACKUP, SHOW CLUSTER SETTING, SHOW COLUMNS, SHOW CONSTRAINTS, SHOW TRIGGERS,
 // SHOW CREATE, SHOW CREATE SCHEDULES, SHOW DATABASES, SHOW DEFAULT SESSION VARIABLES,
 // SHOW ENUMS, SHOW FUNCTION, SHOW FUNCTIONS, SHOW HISTOGRAM, SHOW INDEXES, SHOW PARTITIONS,
 // SHOW JOBS, SHOW STATEMENTS, SHOW RANGE, SHOW RANGES, SHOW REGIONS, SHOW SURVIVAL GOAL,
@@ -7821,6 +7818,7 @@ show_stmt:
   show_backup_stmt           // EXTEND WITH HELP: SHOW BACKUP
 | show_columns_stmt          // EXTEND WITH HELP: SHOW COLUMNS
 | show_constraints_stmt      // EXTEND WITH HELP: SHOW CONSTRAINTS
+| show_triggers_stmt         // EXTEND WITH HELP: SHOW TRIGGERS
 | show_create_stmt           // EXTEND WITH HELP: SHOW CREATE
 | show_create_schedules_stmt // EXTEND WITH HELP: SHOW CREATE SCHEDULES
 | show_create_external_connections_stmt // EXTEND WITH HELP: SHOW CREATE EXTERNAL CONNECTIONS
@@ -8697,6 +8695,18 @@ show_constraints_stmt:
   }
 | SHOW CONSTRAINTS error // SHOW HELP: SHOW CONSTRAINTS
 
+// %Help: SHOW TRIGGERS - list triggers on a table
+// %Category: DDL
+// %Text: SHOW TRIGGERS FROM <tablename>
+// TODO(drewk): Add docs link.
+show_triggers_stmt:
+  SHOW TRIGGERS FROM table_name
+  {
+    $$.val = &tree.ShowTriggers{Table: $4.unresolvedObjectName()}
+  }
+| SHOW TRIGGER error // SHOW HELP: SHOW TRIGGERS
+| SHOW TRIGGERS error // SHOW HELP: SHOW TRIGGERS
+
 // %Help: SHOW STATEMENTS - list running statements
 // %Category: Misc
 // %Text: SHOW [ALL] [CLUSTER | LOCAL] STATEMENTS
@@ -9237,6 +9247,14 @@ show_create_stmt:
         FunctionReference: $4.unresolvedObjectName().ToUnresolvedName(),
       },
       Procedure: true,
+    }
+  }
+| SHOW CREATE TRIGGER name ON table_name
+  {
+    /* SKIP DOC */
+    $$.val = &tree.ShowCreateTrigger{
+      Name: tree.Name($4),
+      TableName: $6.unresolvedObjectName(),
     }
   }
 | SHOW CREATE ALL SCHEMAS
@@ -17650,6 +17668,7 @@ unreserved_keyword:
 | LOCAL
 | LOCKED
 | LOGICAL
+| LOGICALLY
 | LOGIN
 | LOCALITY
 | LOOKUP
@@ -17778,6 +17797,7 @@ unreserved_keyword:
 | RENAME
 | REPEATABLE
 | REPLACE
+| REPLICATED
 | REPLICATION
 | RESET
 | RESTART
@@ -17883,6 +17903,7 @@ unreserved_keyword:
 | TRANSFER
 | TRANSFORM
 | TRIGGER
+| TRIGGERS
 | TRUNCATE
 | TRUSTED
 | TYPE
@@ -18207,6 +18228,7 @@ bare_label_keywords:
 | LOCALTIMESTAMP
 | LOCKED
 | LOGICAL
+| LOGICALLY
 | LOGIN
 | LOOKUP
 | LOW
@@ -18348,6 +18370,7 @@ bare_label_keywords:
 | RENAME
 | REPEATABLE
 | REPLACE
+| REPLICATED
 | REPLICATION
 | RESET
 | RESTART
@@ -18472,6 +18495,7 @@ bare_label_keywords:
 | TRANSFORM
 | TREAT
 | TRIGGER
+| TRIGGERS
 | TRIM
 | TRUE
 | TRUNCATE

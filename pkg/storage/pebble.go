@@ -102,8 +102,8 @@ var IngestSplitEnabled = settings.RegisterBoolSetting(
 	settings.WithPublic,
 )
 
-// columnarBlocksEnabled controls whether columnar-blocks are enabled in Pebble.
-var columnarBlocksEnabled = settings.RegisterBoolSetting(
+// ColumnarBlocksEnabled controls whether columnar-blocks are enabled in Pebble.
+var ColumnarBlocksEnabled = settings.RegisterBoolSetting(
 	settings.SystemVisible,
 	"storage.columnar_blocks.enabled",
 	"set to true to enable columnar-blocks to store KVs in a columnar format",
@@ -147,6 +147,8 @@ var MinCapacityForBulkIngest = settings.RegisterFloatSetting(
 	"kv.bulk_io_write.min_capacity_remaining_fraction",
 	"remaining store capacity fraction below which bulk ingestion requests are rejected",
 	0.05,
+	settings.FloatInRange(0.04, 0.3),
+	settings.WithPublic,
 )
 
 // BlockLoadConcurrencyLimit controls the maximum number of outstanding
@@ -712,12 +714,12 @@ var EngineComparer = &pebble.Comparer{
 var MVCCMerger = &pebble.Merger{
 	Name: "cockroach_merge_operator",
 	Merge: func(_, value []byte) (pebble.ValueMerger, error) {
-		res := &MVCCValueMerger{}
-		err := res.MergeNewer(value)
+		merger := NewMVCCValueMerger()
+		err := merger.MergeNewer(value)
 		if err != nil {
 			return nil, err
 		}
-		return res, nil
+		return merger, nil
 	},
 }
 
@@ -836,7 +838,7 @@ var PebbleBlockPropertyCollectors = []func() pebble.BlockPropertyCollector{
 // Cockroach code relies on unconditionally (like range keys). New stores are by
 // default created with this version. It should correspond to the minimum
 // supported binary version.
-const MinimumSupportedFormatVersion = pebble.FormatSyntheticPrefixSuffix
+const MinimumSupportedFormatVersion = pebble.FormatColumnarBlocks
 
 // DefaultPebbleOptions returns the default pebble options.
 func DefaultPebbleOptions() *pebble.Options {
@@ -1246,7 +1248,7 @@ func newPebble(ctx context.Context, cfg engineConfig) (p *Pebble, err error) {
 		return IngestSplitEnabled.Get(&cfg.settings.SV)
 	}
 	cfg.opts.Experimental.EnableColumnarBlocks = func() bool {
-		return columnarBlocksEnabled.Get(&cfg.settings.SV)
+		return ColumnarBlocksEnabled.Get(&cfg.settings.SV)
 	}
 	cfg.opts.Experimental.EnableDeleteOnlyCompactionExcises = func() bool {
 		return deleteCompactionsCanExcise.Get(&cfg.settings.SV)
@@ -2572,7 +2574,6 @@ func (p *Pebble) CreateCheckpoint(dir string, spans []roachpb.Span) error {
 // named version, it can be assumed all *nodes* have ratcheted to the pebble
 // version associated with it, since they did so during the fence version.
 var pebbleFormatVersionMap = map[clusterversion.Key]pebble.FormatMajorVersion{
-	clusterversion.V24_2: pebble.FormatSyntheticPrefixSuffix,
 	clusterversion.V24_3: pebble.FormatColumnarBlocks,
 }
 

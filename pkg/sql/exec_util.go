@@ -82,6 +82,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgwirecancel"
 	"github.com/cockroachdb/cockroach/pkg/sql/physicalplan"
 	"github.com/cockroachdb/cockroach/pkg/sql/querycache"
+	"github.com/cockroachdb/cockroach/pkg/sql/rolemembershipcache"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/scheduledlogging"
@@ -780,7 +781,13 @@ var (
 	}
 	MetaDistSQLSelect = metric.Metadata{
 		Name:        "sql.distsql.select.count",
-		Help:        "Number of DistSQL SELECT statements",
+		Help:        "Number of SELECT statements planned to be distributed",
+		Measurement: "SQL Statements",
+		Unit:        metric.Unit_COUNT,
+	}
+	MetaDistSQLSelectDistributed = metric.Metadata{
+		Name:        "sql.distsql.select.distributed_exec.count",
+		Help:        "Number of SELECT statements that were distributed",
 		Measurement: "SQL Statements",
 		Unit:        metric.Unit_COUNT,
 	}
@@ -1329,7 +1336,7 @@ type ExecutorConfig struct {
 	RangeDescriptorCache *rangecache.RangeCache
 
 	// Role membership cache.
-	RoleMemberCache *MembershipCache
+	RoleMemberCache *rolemembershipcache.MembershipCache
 
 	// Node-level sequence cache
 	SequenceCacheNode *sessiondatapb.SequenceCacheNode
@@ -1775,7 +1782,7 @@ func (*SchemaTelemetryTestingKnobs) ModuleTestingKnobs() {}
 
 // BackupRestoreTestingKnobs contains knobs for backup and restore behavior.
 //
-// TODO (msbutler): move these to backupccl
+// TODO (msbutler): move these to backup
 type BackupRestoreTestingKnobs struct {
 	// AfterBackupChunk is called after each chunk of a backup is completed.
 	AfterBackupChunk func()

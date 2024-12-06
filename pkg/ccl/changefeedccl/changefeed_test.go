@@ -6076,10 +6076,16 @@ func TestChangefeedContinuousTelemetry(t *testing.T) {
 
 		sqlDB := sqlutils.MakeSQLRunner(s.DB)
 		sqlDB.Exec(t, `CREATE TABLE foo (id INT PRIMARY KEY)`)
+		// NB: In order for this test to work for sinkless feeds, we must
+		// have at least one row before creating the feed.
+		sqlDB.Exec(t, `INSERT INTO foo VALUES (-1)`)
 
 		foo := feed(t, f, `CREATE CHANGEFEED FOR foo`)
 		defer closeFeed(t, foo)
-		jobID := foo.(cdctest.EnterpriseTestFeed).JobID()
+		var jobID jobspb.JobID
+		if foo, ok := foo.(cdctest.EnterpriseTestFeed); ok {
+			jobID = foo.JobID()
+		}
 
 		for i := 0; i < 5; i++ {
 			beforeCreate := timeutil.Now()
@@ -6088,29 +6094,70 @@ func TestChangefeedContinuousTelemetry(t *testing.T) {
 		}
 	}
 
-	cdcTest(t, testFn, feedTestOmitSinks("sinkless"))
+	cdcTest(t, testFn)
+}
+
+type testTelemetryLogger struct {
+	telemetryLogger
+	afterIncEmittedCounters func(numMessages int, numBytes int)
+}
+
+var _ telemetryLogger = (*testTelemetryLogger)(nil)
+
+func (t *testTelemetryLogger) incEmittedCounters(numMessages int, numBytes int) {
+	t.telemetryLogger.incEmittedCounters(numMessages, numBytes)
+	t.afterIncEmittedCounters(numMessages, numBytes)
 }
 
 func TestChangefeedContinuousTelemetryOnTermination(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
-	skip.WithIssue(t, 120837)
 
 	testFn := func(t *testing.T, s TestServer, f cdctest.TestFeedFactory) {
 		interval := 24 * time.Hour
 		continuousTelemetryInterval.Override(context.Background(), &s.Server.ClusterSettings().SV, interval)
-		beforeCreate := timeutil.Now()
 		sqlDB := sqlutils.MakeSQLRunner(s.DB)
 		sqlDB.Exec(t, `CREATE TABLE foo (id INT PRIMARY KEY)`)
+		// NB: In order for this test to work for sinkless feeds, we must
+		// have at least one row before creating the feed.
+		sqlDB.Exec(t, `INSERT INTO foo VALUES (1)`)
+
+		var seen atomic.Bool
+		waitForIncEmittedCounters := func() error {
+			if !seen.Load() {
+				return errors.Newf("emitted counters have not been incremented yet")
+			}
+			return nil
+		}
+		// Synchronization to prevent a race between the changefeed closing
+		// and the telemetry logger getting emitted counts after messages
+		// have been emitted to the sink.
+		s.TestingKnobs.DistSQL.(*execinfra.TestingKnobs).Changefeed.(*TestingKnobs).
+			WrapTelemetryLogger = func(logger telemetryLogger) telemetryLogger {
+			return &testTelemetryLogger{
+				telemetryLogger: logger,
+				afterIncEmittedCounters: func(numMessages int, _ int) {
+					if numMessages > 0 {
+						seen.Store(true)
+					}
+				},
+			}
+		}
 
 		// Insert a row and wait for logs to be created.
+		beforeFirstLog := timeutil.Now()
 		foo := feed(t, f, `CREATE CHANGEFEED FOR foo`)
-		jobID := foo.(cdctest.EnterpriseTestFeed).JobID()
-		sqlDB.Exec(t, `INSERT INTO foo VALUES (1)`)
-		verifyLogsWithEmittedBytesAndMessages(t, jobID, beforeCreate.UnixNano(), interval.Nanoseconds(), false)
+		var jobID jobspb.JobID
+		if foo, ok := foo.(cdctest.EnterpriseTestFeed); ok {
+			jobID = foo.JobID()
+		}
+		testutils.SucceedsSoon(t, waitForIncEmittedCounters)
+		verifyLogsWithEmittedBytesAndMessages(t, jobID, beforeFirstLog.UnixNano(), interval.Nanoseconds(), false /* closing */)
 
 		// Insert more rows. No logs should be created for these since we recently
 		// published them above and the interval is 24h.
+		afterFirstLog := timeutil.Now()
+		seen.Store(false)
 		sqlDB.Exec(t, `INSERT INTO foo VALUES (2)`)
 		sqlDB.Exec(t, `INSERT INTO foo VALUES (3)`)
 		assertPayloads(t, foo, []string{
@@ -6118,14 +6165,14 @@ func TestChangefeedContinuousTelemetryOnTermination(t *testing.T) {
 			`foo: [2]->{"after": {"id": 2}}`,
 			`foo: [3]->{"after": {"id": 3}}`,
 		})
+		testutils.SucceedsSoon(t, waitForIncEmittedCounters)
 
 		// Close the changefeed and ensure logs were created after closing.
-		beforeClose := timeutil.Now()
 		require.NoError(t, foo.Close())
-		verifyLogsWithEmittedBytesAndMessages(t, jobID, beforeClose.UnixNano(), interval.Nanoseconds(), true)
+		verifyLogsWithEmittedBytesAndMessages(t, jobID, afterFirstLog.UnixNano(), interval.Nanoseconds(), true /* closing */)
 	}
 
-	cdcTest(t, testFn, feedTestOmitSinks("sinkless"))
+	cdcTest(t, testFn)
 }
 
 func TestChangefeedContinuousTelemetryDifferentJobs(t *testing.T) {
@@ -8284,7 +8331,7 @@ func TestChangefeedPredicateWithSchemaChange(t *testing.T) {
 
 func startMonitorWithBudget(budget int64) *mon.BytesMonitor {
 	mm := mon.NewMonitor(mon.Options{
-		Name:      "test-mm",
+		Name:      mon.MakeMonitorName("test-mm"),
 		Limit:     budget,
 		Increment: 128, /* small allocation increment */
 		Settings:  cluster.MakeTestingClusterSettings(),
@@ -9432,6 +9479,10 @@ func TestBatchSizeMetric(t *testing.T) {
 func TestParallelIOMetrics(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
+
+	// This test relies on messing with timings to see pending rows build up,
+	//  so skip it when the system is loaded.
+	skip.UnderDuress(t)
 
 	// Add delay so queuing occurs, which results in the below metrics being
 	// nonzero.

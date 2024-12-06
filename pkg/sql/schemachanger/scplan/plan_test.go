@@ -30,6 +30,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/testutils/datapathutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
+	"github.com/cockroachdb/cockroach/pkg/testutils/skip"
 	"github.com/cockroachdb/cockroach/pkg/testutils/sqlutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -248,6 +249,8 @@ func TestExplainPlanIsMemoryMonitored(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
+	skip.UnderDuress(t, "large test; uses a lot of memory")
+
 	ctx := context.Background()
 	s, db, _ := serverutils.StartServer(t, base.TestServerArgs{
 		SQLMemoryPoolSize: 10 << 20, /* 10MiB */
@@ -271,7 +274,7 @@ func TestExplainPlanIsMemoryMonitored(t *testing.T) {
 	})
 
 	monitor := mon.NewMonitor(mon.Options{
-		Name:     "test-sc-plan-mon",
+		Name:     mon.MakeMonitorName("test-sc-plan-mon"),
 		Settings: tt.ClusterSettings(),
 	})
 	monitor.Start(ctx, nil, mon.NewStandaloneBudget(5.243e+6 /* 5MiB */))

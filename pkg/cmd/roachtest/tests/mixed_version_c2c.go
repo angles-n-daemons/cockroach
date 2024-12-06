@@ -19,6 +19,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/roachtestutil"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/roachtestutil/clusterupgrade"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/roachtestutil/mixedversion"
+	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/roachtestutil/task"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/spec"
 	"github.com/cockroachdb/cockroach/pkg/cmd/roachtest/test"
 	"github.com/cockroachdb/cockroach/pkg/roachprod"
@@ -71,7 +72,7 @@ func runC2CMixedVersions(ctx context.Context, t test.Test, c cluster.Cluster, sp
 	cm.WorkloadHook(ctx)
 	cm.LatencyHook(ctx)
 	cm.UpdateHook(ctx)
-	cm.Run(ctx, c)
+	cm.Run(t)
 }
 
 func InitC2CMixed(
@@ -128,7 +129,6 @@ func InitC2CMixed(
 		mixedversion.EnabledDeploymentModes(mixedversion.SharedProcessDeployment),
 		mixedversion.WithTag("source"),
 		mixedversion.WithSkipVersionProbability(boolToProb(sourceVersionSkips)),
-		mixedversion.EnableWaitForReplication, // see #130384
 	)
 
 	destMvt := mixedversion.NewTest(ctx, t, t.L(), c, c.Range(sp.srcNodes+1, sp.srcNodes+sp.dstNodes),
@@ -137,7 +137,6 @@ func InitC2CMixed(
 		mixedversion.EnabledDeploymentModes(mixedversion.SystemOnlyDeployment),
 		mixedversion.WithTag("dest"),
 		mixedversion.WithSkipVersionProbability(boolToProb(destVersionSkips)),
-		mixedversion.EnableWaitForReplication, // see #130384
 	)
 
 	return &c2cMixed{
@@ -451,31 +450,33 @@ func (cm *c2cMixed) sourceFingerprintAndCompare(
 	return nil
 }
 
-func (cm *c2cMixed) Run(ctx context.Context, c cluster.Cluster) {
+func (cm *c2cMixed) Run(t task.Tasker) {
 	var wg sync.WaitGroup
 	wg.Add(2)
 
-	go func() {
+	t.Go(func(_ context.Context, l *logger.Logger) error {
 		defer func() {
 			if r := recover(); r != nil {
-				cm.t.L().Printf("source cluster upgrade failed: %v", r)
+				l.Printf("source cluster upgrade failed: %v", r)
 			}
 		}()
 		defer wg.Done()
 		cm.sourceMvt.Run()
-	}()
+		return nil
+	})
 
-	go func() {
+	t.Go(func(taskCtx context.Context, l *logger.Logger) error {
 		defer func() {
 			if r := recover(); r != nil {
-				cm.t.L().Printf("destination cluster upgrade failed: %v", r)
+				l.Printf("destination cluster upgrade failed: %v", r)
 			}
 		}()
 		defer wg.Done()
 
-		chanReadCtx(ctx, cm.sourceStartedChan)
+		chanReadCtx(taskCtx, cm.sourceStartedChan)
 		cm.destMvt.Run()
-	}()
+		return nil
+	})
 
 	wg.Wait()
 }

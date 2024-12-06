@@ -1,4 +1,4 @@
-# LogicTest: !local-mixed-24.2 !local-legacy-schema-changer
+# LogicTest: !local-legacy-schema-changer
 
 # Include some hidden columns that won't be visible to triggers.
 statement ok
@@ -580,21 +580,22 @@ subtest when_clause
 
 # The WHEN clause must be of type BOOL.
 statement error pgcode 42804 pq: argument of WHEN must be type bool, not type int
-CREATE TRIGGER foo AFTER INSERT ON xy WHEN (1) EXECUTE FUNCTION f();
+CREATE TRIGGER foo AFTER INSERT ON xy FOR EACH ROW WHEN (1) EXECUTE FUNCTION f();
 
 # The WHEN clause cannot reference table columns.
 statement error pgcode 42703 pq: column "x" does not exist\nHINT: column references in a trigger WHEN clause must be prefixed with NEW or OLD
-CREATE TRIGGER foo AFTER INSERT ON xy WHEN (x = 1) EXECUTE FUNCTION f();
+CREATE TRIGGER foo AFTER INSERT ON xy FOR EACH ROW WHEN (x = 1) EXECUTE FUNCTION f();
 
 # The WHEN clause cannot contain a subquery.
 statement error pgcode 0A000 pq: subqueries are not allowed in WHEN
-CREATE TRIGGER foo AFTER INSERT ON xy WHEN (SELECT 1) EXECUTE FUNCTION f();
+CREATE TRIGGER foo AFTER INSERT ON xy FOR EACH ROW WHEN (SELECT 1) EXECUTE FUNCTION f();
 
-statement error pgcode 42P17 pq: statement trigger's WHEN condition cannot reference column values
-CREATE TRIGGER foo AFTER INSERT ON xy WHEN (NEW IS NULL) EXECUTE FUNCTION f();
-
-statement error pgcode 42P17 pq: statement trigger's WHEN condition cannot reference column values
-CREATE TRIGGER foo AFTER INSERT ON xy WHEN (OLD IS NULL) EXECUTE FUNCTION f();
+# TODO(#126362): uncomment these test cases.
+# statement error pgcode 42P17 pq: statement trigger's WHEN condition cannot reference column values
+# CREATE TRIGGER foo AFTER INSERT ON xy WHEN (NEW IS NULL) EXECUTE FUNCTION f();
+#
+# statement error pgcode 42P17 pq: statement trigger's WHEN condition cannot reference column values
+# CREATE TRIGGER foo AFTER INSERT ON xy WHEN (OLD IS NULL) EXECUTE FUNCTION f();
 
 statement error pgcode 42P17 pq: DELETE trigger's WHEN condition cannot reference NEW values
 CREATE TRIGGER foo AFTER DELETE ON xy FOR EACH ROW WHEN (NEW IS NULL) EXECUTE FUNCTION f();
@@ -622,7 +623,7 @@ CREATE FUNCTION g() RETURNS TRIGGER AS $$
 $$ LANGUAGE PLpgSQL;
 
 statement error pgcode 42P01 pq: relation "nonexistent" does not exist
-CREATE TRIGGER foo BEFORE INSERT ON xy EXECUTE FUNCTION g();
+CREATE TRIGGER foo BEFORE INSERT ON xy FOR EACH ROW EXECUTE FUNCTION g();
 
 statement ok
 DROP FUNCTION g;
@@ -650,7 +651,7 @@ CREATE FUNCTION g() RETURNS TRIGGER AS $$
 $$ LANGUAGE PLpgSQL;
 
 statement error pgcode 42883 pq: unknown function: f_nonexistent()
-CREATE TRIGGER foo AFTER DELETE ON xy EXECUTE FUNCTION g();
+CREATE TRIGGER foo AFTER DELETE ON xy FOR EACH ROW EXECUTE FUNCTION g();
 
 # Case with a nonexistent type reference.
 statement ok
@@ -662,7 +663,7 @@ CREATE FUNCTION g() RETURNS TRIGGER AS $$
 $$ LANGUAGE PLpgSQL;
 
 statement error pgcode 42704 pq: type "typ_nonexistent" does not exist
-CREATE TRIGGER foo BEFORE INSERT ON xy EXECUTE FUNCTION g();
+CREATE TRIGGER foo BEFORE INSERT ON xy FOR EACH ROW EXECUTE FUNCTION g();
 
 # Incorrect type in a SQL expression.
 statement ok
@@ -691,7 +692,7 @@ CREATE FUNCTION g() RETURNS TRIGGER AS $$
 $$ LANGUAGE PLpgSQL;
 
 statement error pgcode 0A000 pq: unimplemented: CREATE TABLE usage inside a function definition
-CREATE TRIGGER foo AFTER DELETE ON xy EXECUTE FUNCTION g();
+CREATE TRIGGER foo AFTER DELETE ON xy FOR EACH ROW EXECUTE FUNCTION g();
 
 statement ok
 DROP FUNCTION g;
@@ -736,7 +737,7 @@ statement ok
 DROP TRIGGER bar ON xy;
 
 # Dropping a nonexistent trigger is an error.
-statement error pgcode 42704 pq: trigger "foo" of relation "xy" does not exist
+statement error pgcode 42704 pq: trigger "foo" for table "xy" does not exist
 DROP TRIGGER foo ON xy;
 
 # The IF EXISTS syntax allows dropping a nonexistent trigger without error.
@@ -3466,6 +3467,182 @@ DROP FUNCTION g;
 DROP FUNCTION h;
 
 # ==============================================================================
+# Test SHOW TRIGGERS.
+# ==============================================================================
+
+subtest show_triggers
+
+statement ok
+CREATE TABLE t (a INT, b INT, c INT);
+
+statement ok
+CREATE FUNCTION g() RETURNS TRIGGER LANGUAGE PLpgSQL AS $$ BEGIN RETURN NEW; END $$;
+
+query TB colnames
+SHOW TRIGGERS FROM t;
+----
+trigger_name  enabled
+
+statement ok
+CREATE TRIGGER foo BEFORE INSERT ON t FOR EACH ROW EXECUTE FUNCTION g();
+
+query TB colnames
+SHOW TRIGGERS FROM t;
+----
+trigger_name  enabled
+foo           true
+
+statement ok
+CREATE TRIGGER bar AFTER INSERT ON t FOR EACH ROW EXECUTE FUNCTION g();
+
+query TB colnames,rowsort
+SHOW TRIGGERS FROM t;
+----
+trigger_name  enabled
+foo           true
+bar           true
+
+statement ok
+DROP TRIGGER foo ON t;
+
+query TB colnames
+SHOW TRIGGERS FROM t;
+----
+trigger_name  enabled
+bar           true
+
+statement ok
+DROP TRIGGER bar ON t;
+
+query TB colnames
+SHOW TRIGGERS FROM t;
+----
+trigger_name  enabled
+
+subtest show_triggers_privileges
+
+# The user must have any privilege on the table (or be its owner) to see its
+# triggers.
+statement ok
+REVOKE ALL ON TABLE t FROM testuser;
+
+user testuser
+
+statement error pgcode 42501 pq: user testuser has no privileges on relation t
+SHOW TRIGGERS FROM t;
+
+user root
+
+statement ok
+GRANT INSERT ON TABLE t TO testuser;
+
+user testuser
+
+statement ok
+SHOW TRIGGERS FROM t;
+
+user root
+
+statement ok
+REVOKE ALL ON TABLE t FROM testuser;
+ALTER TABLE t OWNER TO testuser;
+
+user testuser
+
+statement ok
+SHOW TRIGGERS FROM t;
+
+user root
+
+statement ok
+DROP FUNCTION g;
+DROP TABLE t;
+
+# ==============================================================================
+# Test SHOW CREATE TRIGGER.
+# ==============================================================================
+
+subtest show_create_trigger
+
+statement ok
+CREATE TABLE t (a INT, b INT, c INT);
+CREATE FUNCTION g() RETURNS TRIGGER AS $$ BEGIN RETURN NEW; END $$ LANGUAGE PLpgSQL;
+
+statement error pgcode 42704 pq: trigger foo for table t does not exist
+SHOW CREATE TRIGGER foo ON t;
+
+statement ok
+CREATE TRIGGER tr AFTER INSERT ON t FOR EACH ROW EXECUTE FUNCTION g();
+
+statement ok
+CREATE TRIGGER tr2 BEFORE UPDATE ON t FOR EACH ROW EXECUTE FUNCTION g();
+
+statement ok
+CREATE TRIGGER tr3 AFTER INSERT OR UPDATE ON t FOR EACH ROW WHEN ((NEW).a < 5) EXECUTE FUNCTION g();
+
+query TT colnames
+SHOW CREATE TRIGGER tr ON t;
+----
+trigger_name  create_statement
+tr            CREATE TRIGGER tr AFTER INSERT ON test.public.t FOR EACH ROW EXECUTE FUNCTION test.public.g()
+
+query TT colnames
+SHOW CREATE TRIGGER tr2 ON t;
+----
+trigger_name  create_statement
+tr2           CREATE TRIGGER tr2 BEFORE UPDATE ON test.public.t FOR EACH ROW EXECUTE FUNCTION test.public.g()
+
+query TT colnames
+SHOW CREATE TRIGGER tr3 ON t;
+----
+trigger_name  create_statement
+tr3           CREATE TRIGGER tr3 AFTER INSERT OR UPDATE ON test.public.t FOR EACH ROW WHEN (new).a < 5:::INT8 EXECUTE FUNCTION test.public.g()
+
+statement ok
+DROP TRIGGER tr ON t;
+
+statement error pgcode 42704 pq: trigger tr for table t does not exist
+SHOW CREATE TRIGGER tr ON t;
+
+subtest show_create_trigger_privileges
+
+# The user must have any privilege on the table (or be its owner).
+statement ok
+REVOKE ALL ON TABLE t FROM testuser;
+
+user testuser
+
+statement error pgcode 42501 pq: user testuser has no privileges on relation t
+SHOW CREATE TRIGGER tr2 ON t;
+
+user root
+
+statement ok
+GRANT INSERT ON t TO testuser;
+
+user testuser
+
+statement ok
+SHOW CREATE TRIGGER tr2 ON t;
+
+user root
+
+statement ok
+REVOKE ALL ON t FROM testuser;
+ALTER TABLE t OWNER TO testuser;
+
+user testuser
+
+statement ok
+SHOW CREATE TRIGGER tr2 ON t;
+
+user root
+
+statement ok
+DROP TABLE t;
+DROP FUNCTION g;
+
+# ==============================================================================
 # Test unsupported syntax.
 # ==============================================================================
 
@@ -3476,6 +3653,22 @@ CREATE OR REPLACE TRIGGER foo AFTER INSERT ON xy FOR EACH ROW EXECUTE FUNCTION f
 
 statement error pgcode 0A000 pq: unimplemented: cascade dropping triggers
 DROP TRIGGER foo ON xy CASCADE;
+
+statement error pgcode 0A000 pq: unimplemented: statement-level triggers are not yet supported
+CREATE TRIGGER foo AFTER INSERT ON xy FOR EACH STATEMENT EXECUTE FUNCTION f();
+
+statement error pgcode 0A000 pq: unimplemented: INSTEAD OF triggers are not yet supported
+CREATE TRIGGER foo INSTEAD OF INSERT ON v FOR EACH ROW EXECUTE FUNCTION f();
+
+statement error pgcode 0A000 pq: unimplemented: REFERENCING clause is not yet supported for triggers
+CREATE TRIGGER foo AFTER INSERT ON xy REFERENCING NEW TABLE AS nt FOR EACH ROW EXECUTE FUNCTION f();
+
+# TODO(#126362): uncomment this case.
+# statement error pgcode 0A000 pq: unimplemented: TRUNCATE triggers are not yet supported
+# CREATE TRIGGER foo AFTER TRUNCATE ON xy FOR EACH STATEMENT EXECUTE FUNCTION f();
+
+statement error pgcode 0A000 pq: unimplemented: column lists are not yet supported for triggers
+CREATE TRIGGER foo AFTER UPDATE OF y ON xy FOR EACH ROW EXECUTE FUNCTION f();
 
 statement ok
 CREATE TRIGGER foo AFTER INSERT ON xy FOR EACH ROW EXECUTE FUNCTION f();

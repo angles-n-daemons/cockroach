@@ -98,7 +98,10 @@ func registerCDCBench(r registry.Registry) {
 	}
 
 	// Workload impact benchmarks.
-	for _, readPercent := range []int{0, 100} {
+	// TODO(#135952): Reenable readPercent 100. This benchmark historically tested
+	// kv100, but it was disabled because cdc bench can be flaky and kv100 does
+	// not provide enough value for the noise.
+	for _, readPercent := range []int{0} {
 		for _, ranges := range []int64{100, 100000} {
 			const (
 				nodes  = 5 // excluding coordinator and workload nodes
@@ -654,6 +657,8 @@ func writeCDCBenchStats(
 	writer := io.Writer(bytesBuf)
 
 	exporter.Init(&writer)
+	defer roachtestutil.CloseExporter(ctx, exporter, t, c, bytesBuf, node, "")
+
 	var err error
 	reg.GetHandle().Get(metric).Record(valueS)
 	reg.Tick(func(tick histogram.Tick) {
@@ -663,8 +668,5 @@ func writeCDCBenchStats(
 		return err
 	}
 
-	if _, err = roachtestutil.CreateStatsFileInClusterFromExporter(ctx, t, c, bytesBuf, exporter, node); err != nil {
-		return err
-	}
 	return nil
 }

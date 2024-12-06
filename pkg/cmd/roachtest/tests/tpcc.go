@@ -6,9 +6,11 @@
 package tests
 
 import (
+	"bytes"
 	"context"
 	gosql "database/sql"
 	"fmt"
+	"io"
 	"maps"
 	"math"
 	"math/rand"
@@ -33,9 +35,11 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/version"
 	"github.com/cockroachdb/cockroach/pkg/workload/histogram"
+	"github.com/cockroachdb/cockroach/pkg/workload/histogram/exporter"
 	"github.com/cockroachdb/cockroach/pkg/workload/tpcc"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/ttycolor"
+	"github.com/codahale/hdrhistogram"
 	"github.com/lib/pq"
 	promapi "github.com/prometheus/client_golang/api"
 	promv1 "github.com/prometheus/client_golang/api/prometheus/v1"
@@ -263,7 +267,7 @@ func runTPCC(
 		if err != nil {
 			t.Fatal(err)
 		}
-		cep.listen(ctx, l)
+		cep.listen(ctx, t, l)
 		ep = &cep
 	}
 
@@ -300,8 +304,8 @@ func runTPCC(
 				MaybeFlag(opts.DB != "", "db", opts.DB).
 				Flag("warehouses", opts.Warehouses).
 				MaybeFlag(!opts.DisableHistogram, "histograms", histogramsPath).
-				MaybeFlag(t.ExportOpenmetrics(), "histogram-export-format", "openmetrics").
-				MaybeFlag(t.ExportOpenmetrics(), "openmetrics-labels", clusterstats.GetOpenmetricsLabelString(t, c, labelsMap)).
+				MaybeFlag(!opts.DisableHistogram && t.ExportOpenmetrics(), "histogram-export-format", "openmetrics").
+				MaybeFlag(!opts.DisableHistogram && t.ExportOpenmetrics(), "openmetrics-labels", clusterstats.GetOpenmetricsLabelString(t, c, labelsMap)).
 				Flag("ramp", rampDur).
 				Flag("duration", opts.Duration).
 				Flag("prometheus-port", workloadInstances[i].prometheusPort).
@@ -1683,18 +1687,15 @@ func runTPCCBench(ctx context.Context, t test.Test, c cluster.Cluster, b tpccBen
 					extraFlags += " --method=simple"
 				}
 				t.Status(fmt.Sprintf("running benchmark, warehouses=%d", warehouses))
-				histogramsPath := fmt.Sprintf("%s/warehouses=%d/%s", t.PerfArtifactsDir(), warehouses, roachtestutil.GetBenchmarkMetricsFileName(t))
+				histogramsPath := fmt.Sprintf("%s/warehouses=%d/stats.json", t.PerfArtifactsDir(), warehouses)
 				var tenantSuffix string
 				if b.SharedProcessMT {
 					tenantSuffix = fmt.Sprintf(":%s", appTenantName)
 				}
-
-				labels := getTpccLabels(warehouses, rampDur, loadDur, nil)
-
 				cmd := fmt.Sprintf("./cockroach workload run tpcc --warehouses=%d --active-warehouses=%d "+
-					"--tolerate-errors --ramp=%s --duration=%s%s %s {pgurl%s%s}",
+					"--tolerate-errors --ramp=%s --duration=%s%s --histograms=%s {pgurl%s%s}",
 					b.LoadWarehouses(c.Cloud()), warehouses, rampDur,
-					loadDur, extraFlags, roachtestutil.GetWorkloadHistogramArgs(t, c, labels), sqlGateways, tenantSuffix)
+					loadDur, extraFlags, histogramsPath, sqlGateways, tenantSuffix)
 				err := c.RunE(ctx, option.WithNodes(group.LoadNodes), cmd)
 				loadDone <- timeutil.Now()
 				if err != nil {
@@ -1702,26 +1703,43 @@ func runTPCCBench(ctx context.Context, t test.Test, c cluster.Cluster, b tpccBen
 					// count.
 					return errors.Wrapf(err, "error running tpcc load generator")
 				}
-				if !t.ExportOpenmetrics() {
-					roachtestHistogramsPath := filepath.Join(resultsDir, fmt.Sprintf("%d.%d-stats.json", warehouses, groupIdx))
-					if err := c.Get(
-						ctx, t.L(), histogramsPath, roachtestHistogramsPath, group.LoadNodes,
-					); err != nil {
-						// NB: this will let the line search continue. The reason we do this
-						// is because it's conceivable that we made it here, but a VM just
-						// froze up on us. The next search iteration will handle this state.
-						return err
-					}
-					snapshots, err := histogram.DecodeSnapshots(roachtestHistogramsPath)
-					if err != nil {
-						// If we got this far, and can't decode data, it's not a case of
-						// overload but something that deserves failing the whole test.
-						t.Fatal(err)
-					}
-					result := tpcc.NewResultWithSnapshots(warehouses, 0, snapshots)
-					resultChan <- result
-					return nil
+
+				roachtestHistogramsPath := filepath.Join(resultsDir, fmt.Sprintf("%d.%d-stats.json", warehouses, groupIdx))
+				if err := c.Get(
+					ctx, t.L(), histogramsPath, roachtestHistogramsPath, group.LoadNodes,
+				); err != nil {
+					// NB: this will let the line search continue. The reason we do this
+					// is because it's conceivable that we made it here, but a VM just
+					// froze up on us. The next search iteration will handle this state.
+					return err
 				}
+				snapshots, err := histogram.DecodeSnapshots(roachtestHistogramsPath)
+				if err != nil {
+					// If we got this far, and can't decode data, it's not a case of
+					// overload but something that deserves failing the whole test.
+					t.Fatal(err)
+				}
+				result := tpcc.NewResultWithSnapshots(warehouses, 0, snapshots)
+
+				// This roachtest uses the stats.json emitted from hdr histogram to compute Tpmc and show it in the run log
+				// Since directly emitting openmetrics and computing Tpmc from it is not supported, it is better to convert the
+				// stats.json emitted to openmetrics in the test itself and upload it to the cluster
+				if t.ExportOpenmetrics() {
+					// Creating a prefix
+					statsFilePrefix := fmt.Sprintf("warehouses=%d/", warehouses)
+
+					// Create buffer for performance metrics
+					perfBuf := bytes.NewBuffer([]byte{})
+					exporter := roachtestutil.CreateWorkloadHistogramExporterWithLabels(t, c, map[string]string{"warehouses": fmt.Sprintf("%d", warehouses)})
+					writer := io.Writer(perfBuf)
+					exporter.Init(&writer)
+					defer roachtestutil.CloseExporter(ctx, exporter, t, c, perfBuf, group.LoadNodes, statsFilePrefix)
+
+					if err := exportOpenMetrics(exporter, snapshots); err != nil {
+						return errors.Wrapf(err, "error converting histogram to openmetrics")
+					}
+				}
+				resultChan <- result
 				return nil
 			})
 		}
@@ -1869,4 +1887,20 @@ func getTpccLabels(
 	}
 
 	return labels
+}
+
+// This function converts exporter.SnapshotTick to openmetrics into a buffer
+func exportOpenMetrics(
+	exporter exporter.Exporter, snapshots map[string][]exporter.SnapshotTick,
+) error {
+	for _, snaps := range snapshots {
+		for _, s := range snaps {
+			h := hdrhistogram.Import(s.Hist)
+			if err := exporter.SnapshotAndWrite(h, s.Now, s.Elapsed, &s.Name); err != nil {
+				return errors.Wrapf(err, "failed to write snapshot for histogram %q", s.Name)
+			}
+		}
+	}
+
+	return nil
 }

@@ -24,12 +24,11 @@ import (
 )
 
 const (
-	crossFlag          = "cross"
-	cockroachTargetOss = "//pkg/cmd/cockroach-oss:cockroach-oss"
-	cockroachTarget    = "//pkg/cmd/cockroach:cockroach"
-	nogoDisableFlag    = "--norun_validations"
-	geosTarget         = "//c-deps:libgeos"
-	devTarget          = "//pkg/cmd/dev:dev"
+	crossFlag       = "cross"
+	cockroachTarget = "//pkg/cmd/cockroach:cockroach"
+	nogoDisableFlag = "--norun_validations"
+	geosTarget      = "//c-deps:libgeos"
+	devTarget       = "//pkg/cmd/dev:dev"
 )
 
 type buildTarget struct {
@@ -54,7 +53,7 @@ func makeBuildCmd(runE func(cmd *cobra.Command, args []string) error) *cobra.Com
 		// TODO(irfansharif): Flesh out the example usage patterns.
 		Example: `
 	dev build cockroach
-	dev build cockroach-{short,oss}
+	dev build cockroach-short
 	dev build {opt,exec}gen`,
 		Args: cobra.MinimumNArgs(0),
 		RunE: runE,
@@ -77,7 +76,6 @@ var buildTargetMapping = map[string]string{
 	"cloudupload":          "//pkg/cmd/cloudupload:cloudupload",
 	"cockroach":            cockroachTarget,
 	"cockroach-sql":        "//pkg/cmd/cockroach-sql:cockroach-sql",
-	"cockroach-oss":        cockroachTargetOss,
 	"cockroach-short":      "//pkg/cmd/cockroach-short:cockroach-short",
 	"crlfmt":               "@com_github_cockroachdb_crlfmt//:crlfmt",
 	"dev":                  devTarget,
@@ -93,7 +91,6 @@ var buildTargetMapping = map[string]string{
 	"libgeos":              geosTarget,
 	"optgen":               "//pkg/sql/opt/optgen/cmd/optgen:optgen",
 	"optfmt":               "//pkg/sql/opt/optgen/cmd/optfmt:optfmt",
-	"oss":                  cockroachTargetOss,
 	"reduce":               "//pkg/cmd/reduce:reduce",
 	"drtprod":              "//pkg/cmd/drtprod:drtprod",
 	"roachprod":            "//pkg/cmd/roachprod:roachprod",
@@ -184,7 +181,7 @@ func (d *dev) crossBuild(
 	volume string,
 	dockerArgs []string,
 ) error {
-	bazelArgs = append(bazelArgs, fmt.Sprintf("--config=%s", crossConfig), "--config=ci", "-c", "opt")
+	bazelArgs = append(bazelArgs, fmt.Sprintf("--config=%s", crossConfig), "--config=nolintonbuild", "-c", "opt")
 	configArgs := getConfigArgs(bazelArgs)
 	dockerArgs, err := d.getDockerRunArgs(ctx, volume, false, dockerArgs)
 	if err != nil {

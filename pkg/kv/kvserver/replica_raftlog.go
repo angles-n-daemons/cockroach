@@ -27,6 +27,11 @@ import (
 // TODO(pav-kv): make it a proper type, and integrate with the logstore package.
 type replicaLogStorage Replica
 
+// asLogStorage returns the raft.LogStorage implementation of this replica.
+func (r *Replica) asLogStorage() *replicaLogStorage {
+	return (*replicaLogStorage)(r)
+}
+
 // Entries implements the raft.LogStorage interface.
 //
 // NB: maxBytes is advisory, and this method returns at least one entry (unless
@@ -87,7 +92,7 @@ func (r *replicaLogStorage) entriesLocked(
 func (r *Replica) raftEntriesLocked(
 	lo, hi kvpb.RaftIndex, maxBytes uint64,
 ) ([]raftpb.Entry, error) {
-	return (*replicaLogStorage)(r).entriesLocked(lo, hi, maxBytes)
+	return r.asLogStorage().entriesLocked(lo, hi, maxBytes)
 }
 
 // Term implements the raft.LogStorage interface.
@@ -119,7 +124,7 @@ func (r *replicaLogStorage) termLocked(i kvpb.RaftIndex) (kvpb.RaftTerm, error) 
 
 // raftTermLocked implements the Term() call.
 func (r *Replica) raftTermLocked(i kvpb.RaftIndex) (kvpb.RaftTerm, error) {
-	return (*replicaLogStorage)(r).termLocked(i)
+	return r.asLogStorage().termLocked(i)
 }
 
 // GetTerm returns the term of the entry at the given index in the raft log.
@@ -157,8 +162,7 @@ func (r *replicaLogStorage) FirstIndex() uint64 {
 
 // raftFirstIndexRLocked implements the FirstIndex() call.
 func (r *Replica) raftFirstIndexRLocked() kvpb.RaftIndex {
-	// TruncatedState is guaranteed to be non-nil.
-	return r.shMu.state.TruncatedState.Index + 1
+	return r.shMu.raftTruncState.Index + 1
 }
 
 // GetFirstIndex returns the index of the first entry in the raft log.
@@ -267,8 +271,7 @@ func (r *replicaRaftMuLogSnap) LastIndex() uint64 {
 // Requires that r.raftMu is held.
 func (r *replicaRaftMuLogSnap) FirstIndex() uint64 {
 	r.raftMu.AssertHeld()
-	// r.mu.state is mutated both under r.raftMu and r.mu, so the access is safe.
-	return uint64(r.shMu.state.TruncatedState.Index + 1)
+	return uint64(r.shMu.raftTruncState.Index + 1)
 }
 
 // LogSnapshot implements the raft.LogStorageSnapshot interface.

@@ -15,8 +15,10 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
@@ -40,17 +42,17 @@ var (
 	// each site in datadog has a different host name. ddSiteToHostMap
 	// holds the mapping of site name to the host name.
 	ddSiteToHostMap = map[string]string{
-		"us1":     "api.datadoghq.com",
-		"us3":     "api.us3.datadoghq.com",
-		"us5":     "api.us5.datadoghq.com",
-		"eu1":     "api.datadoghq.eu",
-		"ap1":     "api.ap1.datadoghq.com",
-		"us1-fed": "api.ddog-gov.com",
+		"us1":     "datadoghq.com",
+		"us3":     "us3.datadoghq.com",
+		"us5":     "us5.datadoghq.com",
+		"eu1":     "datadoghq.eu",
+		"ap1":     "ap1.datadoghq.com",
+		"us1-fed": "ddog-gov.com",
 	}
 
-	targetURLFormat           = "https://%s/api/v2/series"
+	targetURLFormat           = "https://api.%s/api/v2/series"
 	datadogDashboardURLFormat = "https://us5.datadoghq.com/dashboard/bif-kwe-gx2/self-hosted-db-console-tsdump?" +
-		"tpl_var_cluster=%s&tpl_var_upload_id=%s&from_ts=%d&to_ts=%d"
+		"tpl_var_cluster=%s&tpl_var_upload_id=%s&tpl_var_upload_day=%d&tpl_var_upload_month=%d&tpl_var_upload_year=%d&from_ts=%d&to_ts=%d"
 	zipFileSignature = []byte{0x50, 0x4B, 0x03, 0x04}
 )
 
@@ -86,16 +88,12 @@ type DatadogResp struct {
 	Errors []string `json:"errors"`
 }
 
-var newTsdumpUploadID = func() string {
-	clusterTagValue := ""
+var newTsdumpUploadID = func(uploadTime time.Time) string {
+	clusterTagValue := "cluster-debug"
 	if debugTimeSeriesDumpOpts.clusterLabel != "" {
 		clusterTagValue = debugTimeSeriesDumpOpts.clusterLabel
-	} else if serverCfg.ClusterName != "" {
-		clusterTagValue = serverCfg.ClusterName
-	} else {
-		clusterTagValue = fmt.Sprintf("cluster-debug-%d", timeutil.Now().Unix())
 	}
-	return newUploadID(clusterTagValue)
+	return newUploadID(clusterTagValue, uploadTime)
 }
 
 // datadogWriter can convert our metrics to Datadog format and send
@@ -112,6 +110,7 @@ type datadogWriter struct {
 	namePrefix string
 	doRequest  func(req *http.Request) error
 	threshold  int
+	uploadTime time.Time
 }
 
 func makeDatadogWriter(
@@ -121,15 +120,23 @@ func makeDatadogWriter(
 	threshold int,
 	doRequest func(req *http.Request) error,
 ) *datadogWriter {
+
+	currentTime := getCurrentTime()
+
 	return &datadogWriter{
 		targetURL:  targetURL,
-		uploadID:   newTsdumpUploadID(),
+		uploadID:   newTsdumpUploadID(currentTime),
 		init:       init,
 		apiKey:     apiKey,
 		namePrefix: "crdb.tsdump.", // Default pre-set prefix to distinguish these uploads.
 		doRequest:  doRequest,
 		threshold:  threshold,
+		uploadTime: currentTime,
 	}
+}
+
+var getCurrentTime = func() time.Time {
+	return timeutil.Now()
 }
 
 func doDDRequest(req *http.Request) error {
@@ -201,17 +208,7 @@ func dump(kv *roachpb.KeyValue) (*DatadogSeries, error) {
 var printLock syncutil.Mutex
 
 func (d *datadogWriter) emitDataDogMetrics(data []DatadogSeries) error {
-	var tags []string
-	// Hardcoded values
-	tags = append(tags, "cluster_type:SELF_HOSTED")
-	tags = append(tags, "job:cockroachdb")
-	tags = append(tags, "region:local")
-
-	if debugTimeSeriesDumpOpts.clusterLabel != "" {
-		tags = append(tags, makeDDTag("cluster_label", debugTimeSeriesDumpOpts.clusterLabel))
-	}
-
-	tags = append(tags, makeDDTag(uploadIDTag, d.uploadID))
+	tags := getUploadTags(d)
 
 	for i := 0; i < len(data); i++ {
 		data[i].Tags = append(data[i].Tags, tags...)
@@ -246,6 +243,37 @@ func (d *datadogWriter) emitDataDogMetrics(data []DatadogSeries) error {
 	}()
 
 	return d.flush(data)
+}
+
+func getUploadTags(d *datadogWriter) []string {
+	var tags []string
+	// Hardcoded values
+	tags = append(tags, "cluster_type:SELF_HOSTED")
+
+	if debugTimeSeriesDumpOpts.clusterLabel != "" {
+		tags = append(tags, makeDDTag("cluster_label", debugTimeSeriesDumpOpts.clusterLabel))
+	}
+	if debugTimeSeriesDumpOpts.clusterID != "" {
+		tags = append(tags, makeDDTag("cluster_id", debugTimeSeriesDumpOpts.clusterID))
+	}
+	if debugTimeSeriesDumpOpts.zendeskTicket != "" {
+		tags = append(tags, makeDDTag("zendesk_ticket", debugTimeSeriesDumpOpts.zendeskTicket))
+	}
+	if debugTimeSeriesDumpOpts.organizationName != "" {
+		tags = append(tags, makeDDTag("org_name", debugTimeSeriesDumpOpts.organizationName))
+	}
+	if debugTimeSeriesDumpOpts.userName != "" {
+		tags = append(tags, makeDDTag("user_name", debugTimeSeriesDumpOpts.userName))
+	}
+
+	tags = append(tags, makeDDTag(uploadIDTag, d.uploadID))
+
+	year, month, day := d.uploadTime.Date()
+	tags = append(tags, makeDDTag("upload_timestamp", d.uploadTime.Format("2006-01-02 15:04:05")))
+	tags = append(tags, makeDDTag("upload_year", strconv.Itoa(year)))
+	tags = append(tags, makeDDTag("upload_month", strconv.Itoa(int(month))))
+	tags = append(tags, makeDDTag("upload_day", strconv.Itoa(day)))
+	return tags
 }
 
 func (d *datadogWriter) flush(data []DatadogSeries) error {
@@ -363,7 +391,8 @@ func (d *datadogWriter) upload(fileName string) error {
 	toUnixTimestamp := timeutil.Now().UnixMilli()
 	//create timestamp for T-30 days.
 	fromUnixTimestamp := toUnixTimestamp - (30 * 24 * 60 * 60 * 1000)
-	dashboardLink := fmt.Sprintf(datadogDashboardURLFormat, debugTimeSeriesDumpOpts.clusterLabel, d.uploadID, fromUnixTimestamp, toUnixTimestamp)
+	year, month, day := d.uploadTime.Date()
+	dashboardLink := fmt.Sprintf(datadogDashboardURLFormat, debugTimeSeriesDumpOpts.clusterLabel, d.uploadID, day, int(month), year, fromUnixTimestamp, toUnixTimestamp)
 
 	if len(errorsInDDUpload.errors) != 0 {
 		fmt.Printf("\n%d upload errors occurred:\n%s\n", len(errorsInDDUpload.errors), strings.Join(errorsInDDUpload.errors, "\n"))

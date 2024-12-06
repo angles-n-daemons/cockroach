@@ -361,10 +361,16 @@ func (nm *nodeMetrics) UpdateMetricsOnRangefeedConnect() {
 	nm.ActiveMuxRangeFeed.Inc(1)
 }
 
-// UpdateOnRangefeedDisconnect decrements rangefeed metrics when a server
-// rangefeed is disconnected.
+// UpdateMetricsOnRangefeedDisconnect decrements rangefeed metrics when one
+// server rangefeed is disconnected.
 func (nm *nodeMetrics) UpdateMetricsOnRangefeedDisconnect() {
-	nm.ActiveMuxRangeFeed.Dec(1)
+	nm.UpdateMetricsOnRangefeedDisconnectBy(1)
+}
+
+// UpdateMetricsOnRangefeedDisconnectBy decrements rangefeed metrics by the
+// given num argument when there are multiple rangefeed disconnects.
+func (nm *nodeMetrics) UpdateMetricsOnRangefeedDisconnectBy(num int64) {
+	nm.ActiveMuxRangeFeed.Dec(num)
 }
 
 // A Node manages a map of stores (by store ID) for which it serves
@@ -1939,10 +1945,10 @@ func setupSpanForIncomingRPC(
 	remoteParent := !ba.TraceInfo.Empty()
 	if !remoteParent {
 		// This is either a local request which circumvented gRPC, or a remote
-		// request that didn't specify tracing information. In the former case,
-		// EnsureChildSpan will create a child span, in the former case we'll get a
-		// root span.
-		ctx, newSpan = tracing.EnsureChildSpan(ctx, tr, grpcinterceptor.BatchMethodName, tracing.WithServerSpanKind)
+		// request that didn't specify tracing information. We make a child span
+		// if the incoming request would like to be traced.
+		ctx, newSpan = tracing.ChildSpan(ctx,
+			grpcinterceptor.BatchMethodName, tracing.WithServerSpanKind)
 	} else {
 		// Non-local call. Tracing information comes from the request proto.
 
@@ -2051,27 +2057,6 @@ func (s *lockedMuxStream) Send(e *kvpb.MuxRangeFeedEvent) error {
 	return s.wrapped.Send(e)
 }
 
-// streamManager is an interface that defines the methods required to manage a
-// rangefeed.Stream at the node level. Implemented by rangefeed.BufferedSender
-// and rangefeed.UnbufferedSender.
-type streamManager interface {
-	// SendBufferedError disconnects the stream with the ev.StreamID and sends
-	// error back to client. This call is un-blocking, and additional clean-up
-	// takes place async. Caller cannot expect immediate disconnection.
-	SendBufferedError(ev *kvpb.MuxRangeFeedEvent)
-	// AddStream adds a new per-range stream for the streamManager to manage.
-	AddStream(streamID int64, cancel context.CancelFunc)
-	// Start starts the streamManager background job to manage all active streams.
-	// It continues until it errors or Stop is called. It is not valid to call
-	// Start multiple times or restart after Stop.
-	Start(ctx context.Context, stopper *stop.Stopper) error
-	// Stop streamManager background job if it is still running.
-	Stop()
-	// Error returns a channel that will be non-empty if the streamManager
-	// encounters an error and a node level shutdown is required.
-	Error() chan error
-}
-
 // perConsumerLimiter is a ConcurrentRequestLimiter for a given mux rangefeed
 // consumer. It is stored in the Node as long as there are active MuxRangeFeed
 // requests the related ConsumerID.
@@ -2143,32 +2128,17 @@ func (n *Node) MuxRangeFeed(muxStream kvpb.Internal_MuxRangeFeedServer) error {
 	ctx, cancel := context.WithCancel(n.AnnotateCtx(muxStream.Context()))
 	defer cancel()
 
-	var sm streamManager
+	sm := &rangefeed.StreamManager{}
 	if kvserver.RangefeedUseBufferedSender.Get(&n.storeCfg.Settings.SV) {
-		// Should be unreachable in production builds.
-		sm = rangefeed.NewBufferedSender(lockedMuxStream, n.metrics)
-		return kvserver.ErrBufferedSenderNotSupported
+		sm = rangefeed.NewStreamManager(rangefeed.NewBufferedSender(lockedMuxStream), n.metrics)
 	} else {
-		sm = rangefeed.NewUnbufferedSender(lockedMuxStream, n.metrics)
+		sm = rangefeed.NewStreamManager(rangefeed.NewUnbufferedSender(lockedMuxStream), n.metrics)
 	}
 
 	if err := sm.Start(ctx, n.stopper); err != nil {
 		return err
 	}
-	defer sm.Stop()
-
-	makeMuxRangefeedErrorEvent := func(
-		streamID int64, rangeID roachpb.RangeID, err *kvpb.Error,
-	) *kvpb.MuxRangeFeedEvent {
-		ev := &kvpb.MuxRangeFeedEvent{
-			StreamID: streamID,
-			RangeID:  rangeID,
-		}
-		ev.MustSetValue(&kvpb.RangeFeedError{
-			Error: *err,
-		})
-		return ev
-	}
+	defer sm.Stop(ctx)
 
 	var limiter *limit.ConcurrentRequestLimiter
 	var consumerID int64
@@ -2191,29 +2161,20 @@ func (n *Node) MuxRangeFeed(muxStream kvpb.Internal_MuxRangeFeedServer) error {
 			}
 
 			if req.CloseStream {
-				// For client close stream requests, we now shut down at a later time. Check if that is okay.
-				// Note that we will call DisconnectStreamWithError again when
-				// registration.disconnect happens, but DisconnectStreamWithError will
-				// ignore subsequent errors.
-				sm.SendBufferedError(makeMuxRangefeedErrorEvent(req.StreamID, req.RangeID,
-					kvpb.NewError(kvpb.NewRangeFeedRetryError(kvpb.RangeFeedRetryError_REASON_RANGEFEED_CLOSED))))
+				// For client close stream requests, streams are disconnected by calling
+				// the Disconnector (registration.Disconnect).
+				sm.DisconnectStream(req.StreamID,
+					kvpb.NewError(kvpb.NewRangeFeedRetryError(kvpb.RangeFeedRetryError_REASON_RANGEFEED_CLOSED)))
 				continue
 			}
 
-			streamCtx, cancel := context.WithCancel(ctx)
-			streamCtx = logtags.AddTag(streamCtx, "r", req.RangeID)
-			streamCtx = logtags.AddTag(streamCtx, "sm", req.Replica.StoreID)
-			streamCtx = logtags.AddTag(streamCtx, "sid", req.StreamID)
+			tags := &logtags.Buffer{}
+			tags = tags.Add("r", req.RangeID)
+			tags = tags.Add("sm", req.Replica.StoreID)
+			tags = tags.Add("sid", req.StreamID)
+			streamCtx := logtags.AddTags(ctx, tags)
 
-			var streamSink rangefeed.Stream
-			if ubs, ok := sm.(*rangefeed.UnbufferedSender); ok {
-				streamSink = rangefeed.NewPerRangeEventSink(req.RangeID, req.StreamID, ubs)
-			} else if _, ok := sm.(*rangefeed.BufferedSender); ok {
-				log.Fatalf(streamCtx, "unimplemented: buffered sender for rangefeed #126560")
-			} else {
-				log.Fatalf(streamCtx, "unknown sender type %T", sm)
-			}
-			sm.AddStream(req.StreamID, cancel)
+			streamSink := sm.NewStream(req.StreamID, req.RangeID)
 
 			// Get the per-consumer catchup limiter if it is
 			// enabled. We currently assume that a single
@@ -2238,12 +2199,15 @@ func (n *Node) MuxRangeFeed(muxStream kvpb.Internal_MuxRangeFeedServer) error {
 
 			// Rangefeed attempts to register rangefeed a request over the specified
 			// span. If registration fails, it returns an error. Otherwise, it returns
-			// nil without blocking on rangefeed completion. Events are then sent to
-			// the provided streamSink. If the rangefeed disconnects after being
-			// successfully registered, it calls streamSink.SendError with the error.
-			if _, err := n.stores.RangeFeed(streamCtx, req, streamSink, limiter); err != nil {
-				sm.SendBufferedError(
-					makeMuxRangefeedErrorEvent(req.StreamID, req.RangeID, kvpb.NewError(err)))
+			// nil error with its disconnector without blocking on rangefeed
+			// completion. Events are then sent to the provided streamSink.
+			// Disconnector returned can be used to shut down rangefeed from the
+			// stream manager. If rangefeed disconnects with an error after being
+			// successfully registered, it calls streamSink.SendError.
+			if disconnector, err := n.stores.RangeFeed(streamCtx, req, streamSink, limiter); err != nil {
+				streamSink.SendError(kvpb.NewError(err))
+			} else {
+				sm.AddStream(req.StreamID, disconnector)
 			}
 		}
 	}

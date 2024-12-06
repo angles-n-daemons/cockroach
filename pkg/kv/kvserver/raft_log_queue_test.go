@@ -330,13 +330,9 @@ func verifyLogSizeInSync(t *testing.T, r *Replica) {
 	r.raftMu.Lock()
 	defer r.raftMu.Unlock()
 	raftLogSize := r.shMu.raftLogSize
-	actualRaftLogSize, err := ComputeRaftLogSize(context.Background(), r.RangeID, r.store.TODOEngine(), r.SideloadedRaftMuLocked())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if actualRaftLogSize != raftLogSize {
-		t.Fatalf("replica claims raft log size %d, but computed %d", raftLogSize, actualRaftLogSize)
-	}
+	actualRaftLogSize, err := r.raftMu.logStorage.ComputeSize(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, actualRaftLogSize, raftLogSize)
 }
 
 func TestUpdateRaftStatusActivity(t *testing.T) {

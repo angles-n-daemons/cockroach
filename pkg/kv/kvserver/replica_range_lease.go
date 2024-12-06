@@ -43,7 +43,6 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
-	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvpb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/constraint"
@@ -167,6 +166,7 @@ func OverrideDefaultLeaseType(ctx context.Context, sv *settings.Values, typ roac
 	switch typ {
 	case roachpb.LeaseExpiration:
 		ExpirationLeasesOnly.Override(ctx, sv, true)
+		RaftLeaderFortificationFractionEnabled.Override(ctx, sv, 0.0)
 	case roachpb.LeaseEpoch:
 		ExpirationLeasesOnly.Override(ctx, sv, false)
 		RaftLeaderFortificationFractionEnabled.Override(ctx, sv, 0.0)
@@ -176,6 +176,13 @@ func OverrideDefaultLeaseType(ctx context.Context, sv *settings.Values, typ roac
 	default:
 		log.Fatalf(ctx, "unexpected lease type: %v", typ)
 	}
+}
+
+// OverrideLeaderLeaseMetamorphism overrides the default lease type to be
+// epoch based leases, regardless of whether leader leases were metamorphically
+// enabled or not.
+func OverrideLeaderLeaseMetamorphism(ctx context.Context, sv *settings.Values) {
+	RaftLeaderFortificationFractionEnabled.Override(ctx, sv, 0.0)
 }
 
 // leaseRequestHandle is a handle to an asynchronous lease request.
@@ -791,8 +798,9 @@ func (r *Replica) leaseSettings(ctx context.Context) leases.Settings {
 		DisableAboveRaftLeaseTransferSafetyChecks: r.store.cfg.TestingKnobs.DisableAboveRaftLeaseTransferSafetyChecks,
 		AllowLeaseProposalWhenNotLeader:           r.store.cfg.TestingKnobs.AllowLeaseRequestProposalsWhenNotLeader,
 		// TODO(arul): remove this field entirely.
-		ExpToEpochEquiv:        true,
-		MinExpirationSupported: r.store.ClusterSettings().Version.IsActive(ctx, clusterversion.V24_2_LeaseMinTimestamp),
+		ExpToEpochEquiv: true,
+		// TODO(radu): remove this field entirely.
+		MinExpirationSupported: true,
 		RangeLeaseDuration:     r.store.cfg.RangeLeaseDuration,
 	}
 }

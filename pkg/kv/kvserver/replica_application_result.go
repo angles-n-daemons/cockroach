@@ -58,6 +58,10 @@ func clearTrivialReplicatedEvalResultFields(r *kvserverpb.ReplicatedEvalResult) 
 	r.Delta = enginepb.MVCCStatsDelta{}
 	// Rangefeeds have been disconnected prior to application.
 	r.MVCCHistoryMutation = nil
+	// See detailed comment in ReplicatedEvalResult.IsTrivial on why
+	// DoTimelyApplicationToAllReplicas is trivial. It has been consumed in
+	// apply.Batch.Stage.
+	r.DoTimelyApplicationToAllReplicas = false
 }
 
 // prepareLocalResult is performed after the command has been committed to the
@@ -492,8 +496,8 @@ func (r *Replica) handleTruncatedStateResult(
 ) (raftLogDelta int64, expectedFirstIndexWasAccurate bool) {
 	r.mu.Lock()
 	expectedFirstIndexWasAccurate =
-		r.shMu.state.TruncatedState.Index+1 == expectedFirstIndexPreTruncation
-	r.shMu.state.TruncatedState = t
+		r.shMu.raftTruncState.Index+1 == expectedFirstIndexPreTruncation
+	r.shMu.raftTruncState = *t
 	r.mu.Unlock()
 
 	// Clear any entries in the Raft log entry cache for this range up
