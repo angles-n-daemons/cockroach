@@ -413,6 +413,14 @@ export function queryTimeSeries(
   req: TimeSeriesQueryRequestMessage,
   timeout?: moment.Duration,
 ): Promise<TimeSeriesQueryResponseMessage> {
+  if (req.queries.filter(q => q.name === "cr.node.sys.goroutines").length) {
+    timeoutFetch(
+      tspb.TimeSeriesQueryResponse,
+      `ts/query`,
+      req as any,
+      timeout,
+    ).then(console.log);
+  }
   return timeoutFetch(
     tspb.TimeSeriesQueryResponse,
     `ts/query`,

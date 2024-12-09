@@ -6,21 +6,14 @@ import { hotRangesSelector, isValidSelector } from "oss/src/redux/hotRanges";
 import { cockroach } from "src/js/protos";
 import { refreshHotRanges } from "src/redux/apiReducers";
 
-
-import {
-  MetricsDataComponentProps,
-} from "../shared/components/metricQuery";
+import { MetricsDataComponentProps } from "../shared/components/metricQuery";
 import {
   SummaryMetricsAggregator,
   aggregateLatestValuesFromMetrics,
 } from "../shared/components/summaryBar";
-import {
-  current,
-} from "../shared/containers/metricDataProvider";
+import { current } from "../shared/containers/metricDataProvider";
 import { nodeIDsSelector } from "oss/src/redux/nodes";
-import {
-  queryTimeSeries,
-} from "oss/src/util/api";
+import { queryTimeSeries } from "oss/src/util/api";
 
 const HotRangesRequest = cockroach.server.serverpb.HotRangesRequest;
 const TSAggregator = protos.cockroach.ts.tspb.TimeSeriesQueryAggregator;
@@ -47,7 +40,7 @@ function coefficientOfVariation(array: number[]) {
 }
 
 interface Datapoint {
-  node: number,
+  node: number;
   qps: number;
   cpu: number;
   write_bytes: number;
@@ -66,7 +59,6 @@ function hotRangesToDatapoints(ranges: HotRange[]): Datapoint[] {
     write_bytes: range.write_bytes_per_second,
   }));
 }
-
 
 async function getMiscData(): Promise<cell[]> {
   const timeInfo = current();
@@ -113,6 +105,12 @@ async function getMiscData(): Promise<cell[]> {
       aggregator: TSAggregator.AVG,
       derivative: TSDerivative.NONE,
     },
+    {
+      name: "cr.node.sys.runnable.goroutines.per.cpu",
+      downsampler: TSAggregator.AVG,
+      aggregator: TSAggregator.VARIANCE,
+      derivative: TSDerivative.NONE,
+    },
   ];
   const data = await queryTimeSeries(
     new TimeSeriesQueryRequest({
@@ -122,22 +120,28 @@ async function getMiscData(): Promise<cell[]> {
       sample_nanos: timeInfo.sampleDuration,
     }),
   );
-  return data.results.map((result) => {
-    let identifier = '';
+  return data.results.map(result => {
+    let identifier = "";
     switch (result.query.name) {
       case "cr.node.sql.crud_query.count":
-        identifier = "Cluster QPS"; break;
+        identifier = "Cluster QPS";
+        break;
       case "kv.concurrency.avg_lock_wait_duration_nanos":
-        identifier = "Lock Wait"; break;
+        identifier = "Lock Wait";
+        break;
       case "kv.concurrency.latch_conflict_wait_durations":
-        identifier = "Latch Wait"; break;
+        identifier = "Latch Wait";
+        break;
       case "cr.node.sys.runnable.goroutines.per.cpu":
-        identifier = "Runnable Goroutines per CPU"; break;
+        identifier = "Runnable Goroutines per CPU";
+        break;
       default:
-        throw new Error('i dont know this type ' + result.query.name);
+        throw new Error("i dont know this type " + result.query.name);
     }
     identifier += ` (${TSAggregator[result.query.downsampler]})`;
-    const value = result.datapoints.length ? result.datapoints[0].value.toFixed(3) : "missing"
+    const value = result.datapoints.length
+      ? result.datapoints[0].value.toFixed(3)
+      : "missing";
     return { identifier, value };
   });
 }
@@ -196,14 +200,17 @@ async function getNodeDatapoints(nodeIDs: number[]): Promise<Datapoint[]> {
         nodeData[nodeId].write_bytes = result.datapoints[0].value;
         break;
       default:
-        throw new Error('i dont know this type ' + result.query.name);
+        throw new Error("i dont know this type " + result.query.name);
     }
   }
   return Object.entries(nodeData).map(([_, v]) => v);
 }
 
-
-function collectResults(nodes: Datapoint[], nodeRanges: Datapoint[], allRanges: Datapoint[]): cell[] {
+function collectResults(
+  nodes: Datapoint[],
+  nodeRanges: Datapoint[],
+  allRanges: Datapoint[],
+): cell[] {
   const results = [];
   for (const [datasetID, dataset] of [
     ["N", nodes],
@@ -213,18 +220,29 @@ function collectResults(nodes: Datapoint[], nodeRanges: Datapoint[], allRanges: 
     if (!dataset?.length) {
       continue;
     }
-    for (const [aggregator, aggFn] of [
-      ["M", (numbers: number[]) => Math.max(...numbers)],
-      ["A", mean],
-      ["Cv", coefficientOfVariation],
+    for (const [metric, metricKey] of [
+      ["Q", "qps"],
+      ["C", "cpu"],
+      ["W", "write_bytes"],
     ]) {
-      for (const [metric, metricKey] of [
-        ["Q", "qps"],
-        ["C", "cpu"],
-        ["W", "write_bytes"],
+      for (const [aggregator, aggFn] of [
+        ["M", (numbers: number[]) => Math.max(...numbers)],
+        ["A", mean],
+        ["S", stddev],
       ]) {
-        const identifier = datasetID as string + aggregator + metric;
-        const numbers = (dataset as Datapoint[]).map((range: any) => range[metricKey]);
+        const identifier = (datasetID as string) + aggregator + metric;
+        const numbers = (dataset as Datapoint[]).map(
+          (range: any) => {
+            let num = range[metricKey]
+            if (metric === "C" && datasetID !== "N") {
+              num /= 1000000000;
+            }
+            if (metric === "W") {
+              num /= 1000;
+            }
+            return num
+          },
+        );
         let value = "";
         value = (aggFn as any)(numbers).toFixed(3);
         results.push({ identifier, value });
@@ -269,11 +287,9 @@ const HotspotsExperiment = () => {
 
   let results = miscData;
   if (hottest) {
-    results = results.concat(collectResults(
-      nodeData,
-      nodeRanges[hottest.node],
-      ranges,
-    ));
+    results = results.concat(
+      collectResults(nodeData, nodeRanges[hottest.node], ranges),
+    );
   }
 
   return (
