@@ -41,6 +41,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/liveness/livenesspb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/logstore"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/rditer"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/split"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/stateloader"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/storeliveness"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/txnwait"
@@ -273,7 +274,7 @@ func createTestStoreWithoutStart(
 	}, ds)
 	require.Nil(t, cfg.DB)
 	cfg.DB = kv.NewDB(cfg.AmbientCtx, txnCoordSenderFactory, cfg.Clock, stopper)
-	store := NewStore(ctx, *cfg, eng, nodeDesc)
+	store := NewStore(ctx, *cfg, eng, nodeDesc, split.NewReplicaSamplingNotifier())
 	storeSender.Sender = store
 
 	storeIdent := roachpb.StoreIdent{NodeID: 1, StoreID: 1}
@@ -549,7 +550,7 @@ func TestInitializeEngineErrors(t *testing.T) {
 
 	cfg := TestStoreConfig(nil)
 	cfg.Transport = NewDummyRaftTransport(cfg.AmbientCtx, cfg.Settings, cfg.Clock)
-	store := NewStore(ctx, cfg, eng, &roachpb.NodeDescriptor{NodeID: 1})
+	store := NewStore(ctx, cfg, eng, &roachpb.NodeDescriptor{NodeID: 1}, split.NewReplicaSamplingNotifier())
 
 	// Can't init as haven't bootstrapped.
 	err := store.Start(ctx, stopper)

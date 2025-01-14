@@ -51,6 +51,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/raftentry"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/rangefeed"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/rditer"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/split"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/storeliveness"
 	slpb "github.com/cockroachdb/cockroach/pkg/kv/kvserver/storeliveness/storelivenesspb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/tenantrate"
@@ -920,6 +921,10 @@ type Store struct {
 	// replicaFlowControlIntegration implementation.
 	raftTransportForFlowControl raftTransportForFlowControl
 
+	// samplingNotifier is a node-wide counter which keeps track of how many
+	// deciders are actively sampling for split keys.
+	samplingNotifier *split.ReplicaSamplingNotifier
+
 	// kvflowRangeControllerFactory is used for replication AC (flow control) V2
 	// to create new range controllers which mediate the flow of requests to
 	// replicas.
@@ -1465,7 +1470,11 @@ func (sc *StoreConfig) Tracer() *tracing.Tracer {
 
 // NewStore returns a new instance of a store.
 func NewStore(
-	ctx context.Context, cfg StoreConfig, eng storage.Engine, nodeDesc *roachpb.NodeDescriptor,
+	ctx context.Context,
+	cfg StoreConfig,
+	eng storage.Engine,
+	nodeDesc *roachpb.NodeDescriptor,
+	samplingNotifier *split.ReplicaSamplingNotifier,
 ) *Store {
 	if !cfg.Valid() {
 		log.Fatalf(ctx, "invalid store configuration: %+v", &cfg)
@@ -1489,6 +1498,7 @@ func NewStore(
 		ctSender:                          cfg.ClosedTimestampSender,
 		ioThresholds:                      &iot,
 		rangeFeedSlowClosedTimestampNudge: singleflight.NewGroup("rangfeed-ct-nudge", "range"),
+		samplingNotifier:                  samplingNotifier,
 	}
 	s.ioThreshold.t = &admissionpb.IOThreshold{}
 	// Track the maxScore over the last 5 minutes, in one minute windows.
@@ -1513,6 +1523,7 @@ func NewStore(
 			func(ctx context.Context, obj LBRebalancingObjective) {
 				s.VisitReplicas(func(r *Replica) (wantMore bool) {
 					r.loadBasedSplitter.SetSplitObjective(
+						ctx,
 						s.Clock().PhysicalTime(),
 						obj.ToSplitObjective(),
 					)

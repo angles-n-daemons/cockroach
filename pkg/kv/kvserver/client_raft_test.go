@@ -35,6 +35,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/liveness"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/liveness/livenesspb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/rditer"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/split"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/stateloader"
 	raft "github.com/cockroachdb/cockroach/pkg/raft"
 	"github.com/cockroachdb/cockroach/pkg/raft/raftpb"
@@ -7045,7 +7046,7 @@ func TestStoreMetricsOnIncomingOutgoingMsg(t *testing.T) {
 	eng := storage.NewDefaultInMemForTesting()
 	stopper.AddCloser(eng)
 	cfg.Transport = kvserver.NewDummyRaftTransport(cfg.AmbientCtx, cfg.Settings, cfg.Clock)
-	store := kvserver.NewStore(ctx, cfg, eng, &node)
+	store := kvserver.NewStore(ctx, cfg, eng, &node, split.NewReplicaSamplingNotifier())
 	store.Ident = &roachpb.StoreIdent{
 		ClusterID: uuid.Nil,
 		StoreID:   1,

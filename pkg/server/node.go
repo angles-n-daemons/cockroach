@@ -36,6 +36,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvstorage"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/liveness/livenesspb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/rangefeed"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/split"
 	"github.com/cockroachdb/cockroach/pkg/multitenant"
 	"github.com/cockroachdb/cockroach/pkg/multitenant/tenantcapabilities"
 	"github.com/cockroachdb/cockroach/pkg/multitenant/tenantcapabilities/tenantcapabilitieswatcher"
@@ -444,6 +445,9 @@ type Node struct {
 
 	// licenseEnforcer is used to enforce license policies on the cluster
 	licenseEnforcer *license.Enforcer
+
+	// samplingNotifier is used to keep track of when replica sampling turns on and off in the node.
+	samplingNotifier *split.ReplicaSamplingNotifier
 }
 
 var _ kvpb.InternalServer = &Node{}
@@ -598,6 +602,7 @@ func NewNode(
 	spanConfigReporter spanconfig.Reporter,
 	proxySender kv.Sender,
 	licenseEnforcer *license.Enforcer,
+	samplingNotifier *split.ReplicaSamplingNotifier,
 ) *Node {
 	n := &Node{
 		storeCfg:              cfg,
@@ -617,6 +622,7 @@ func NewNode(
 		spanStatsCollector:    spanstatscollector.New(cfg.Settings),
 		proxySender:           proxySender,
 		licenseEnforcer:       licenseEnforcer,
+		samplingNotifier:      samplingNotifier,
 	}
 	n.perConsumerCatchupLimiterMu.limiters = make(map[int64]*perConsumerLimiter)
 	n.diskSlowCoalescerMu.lastDiskSlow = make(map[roachpb.StoreID]time.Time)
@@ -710,7 +716,7 @@ func (n *Node) start(
 			stop.TaskOpts{TaskName: "initialize-stores", SpanOpt: stop.FollowsFromSpan, Sem: sem, WaitForSem: true},
 			func(ctx context.Context) {
 				start := timeutil.Now()
-				s := kvserver.NewStore(ctx, n.storeCfg, engine, &n.Descriptor)
+				s := kvserver.NewStore(ctx, n.storeCfg, engine, &n.Descriptor, n.samplingNotifier)
 				if err := s.Start(workersCtx, n.stopper); err != nil {
 					engineErrC <- errors.Wrap(err, "failed to start store")
 					return
@@ -1021,7 +1027,7 @@ func (n *Node) initializeAdditionalStores(
 				return err
 			}
 
-			s := kvserver.NewStore(ctx, n.storeCfg, eng, &n.Descriptor)
+			s := kvserver.NewStore(ctx, n.storeCfg, eng, &n.Descriptor, n.samplingNotifier)
 			if err := s.Start(ctx, stopper); err != nil {
 				return err
 			}

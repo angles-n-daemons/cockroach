@@ -28,6 +28,13 @@ type testLoadSplitConfig struct {
 	statThreshold float64
 }
 
+func testLoadSplitterMetrics() *LoadSplitterMetrics {
+	return &LoadSplitterMetrics{
+		PopularKeyCount: metric.NewCounter(metric.Metadata{}),
+		NoSplitKeyCount: metric.NewCounter(metric.Metadata{}),
+	}
+}
+
 // NewLoadBasedSplitter returns a new LoadBasedSplitter that may be used to
 // find the midpoint based on recorded load.
 func (t *testLoadSplitConfig) NewLoadBasedSplitter(
@@ -76,11 +83,9 @@ func TestDecider(t *testing.T) {
 	}
 
 	var d Decider
-	Init(&d, &loadSplitConfig, &LoadSplitterMetrics{
-		PopularKeyCount: metric.NewCounter(metric.Metadata{}),
-		NoSplitKeyCount: metric.NewCounter(metric.Metadata{}),
-	},
+	Init(&d, &loadSplitConfig, testLoadSplitterMetrics(),
 		SplitQPS,
+		NewReplicaSamplingNotifier(),
 	)
 
 	op := func(s string) func() roachpb.Span {
@@ -225,7 +230,7 @@ func TestDecider(t *testing.T) {
 	// back up at zero.
 	assert.True(t, d.mu.splitFinder.Ready(ms(tick)))
 	assert.Equal(t, roachpb.Key("z"), d.MaybeSplitKey(context.Background(), ms(tick)))
-	d.Reset(ms(tick))
+	d.Reset(context.Background(), ms(tick))
 	assert.Nil(t, d.MaybeSplitKey(context.Background(), ms(tick)))
 	assert.Nil(t, d.mu.splitFinder)
 }
@@ -242,10 +247,7 @@ func TestDecider_MaxStat(t *testing.T) {
 	}
 
 	var d Decider
-	Init(&d, &loadSplitConfig, &LoadSplitterMetrics{
-		PopularKeyCount: metric.NewCounter(metric.Metadata{}),
-		NoSplitKeyCount: metric.NewCounter(metric.Metadata{}),
-	}, SplitQPS)
+	Init(&d, &loadSplitConfig, testLoadSplitterMetrics(), SplitQPS, NewReplicaSamplingNotifier())
 
 	assertMaxStat := func(i int, expMaxStat float64, expOK bool) {
 		t.Helper()
@@ -387,10 +389,7 @@ func TestDeciderMetrics(t *testing.T) {
 		statThreshold: 1,
 	}
 
-	Init(&dPopular, &loadSplitConfig, &LoadSplitterMetrics{
-		PopularKeyCount: metric.NewCounter(metric.Metadata{}),
-		NoSplitKeyCount: metric.NewCounter(metric.Metadata{}),
-	}, SplitCPU)
+	Init(&dPopular, &loadSplitConfig, testLoadSplitterMetrics(), SplitCPU, NewReplicaSamplingNotifier())
 
 	// No split key, popular key
 	for i := 0; i < 20; i++ {
@@ -409,10 +408,7 @@ func TestDeciderMetrics(t *testing.T) {
 
 	// No split key, not popular key
 	var dNotPopular Decider
-	Init(&dNotPopular, &loadSplitConfig, &LoadSplitterMetrics{
-		PopularKeyCount: metric.NewCounter(metric.Metadata{}),
-		NoSplitKeyCount: metric.NewCounter(metric.Metadata{}),
-	}, SplitCPU)
+	Init(&dNotPopular, &loadSplitConfig, testLoadSplitterMetrics(), SplitCPU, NewReplicaSamplingNotifier())
 
 	for i := 0; i < 20; i++ {
 		dNotPopular.Record(context.Background(), ms(timeStart), ld(1), func() roachpb.Span {
@@ -430,10 +426,7 @@ func TestDeciderMetrics(t *testing.T) {
 
 	// No split key, all insufficient counters
 	var dAllInsufficientCounters Decider
-	Init(&dAllInsufficientCounters, &loadSplitConfig, &LoadSplitterMetrics{
-		PopularKeyCount: metric.NewCounter(metric.Metadata{}),
-		NoSplitKeyCount: metric.NewCounter(metric.Metadata{}),
-	}, SplitCPU)
+	Init(&dAllInsufficientCounters, &loadSplitConfig, testLoadSplitterMetrics(), SplitCPU, NewReplicaSamplingNotifier())
 	for i := 0; i < 20; i++ {
 		dAllInsufficientCounters.Record(context.Background(), ms(timeStart), ld(1), func() roachpb.Span {
 			return roachpb.Span{Key: keys.SystemSQLCodec.TablePrefix(uint32(0))}
@@ -447,4 +440,57 @@ func TestDeciderMetrics(t *testing.T) {
 
 	assert.Equal(t, dAllInsufficientCounters.loadSplitterMetrics.PopularKeyCount.Count(), int64(0))
 	assert.Equal(t, dAllInsufficientCounters.loadSplitterMetrics.NoSplitKeyCount.Count(), int64(0))
+}
+
+func TestDeciderSplitFindersActive(t *testing.T) {
+	// Setup two deciders to be used for the same splitFinder counter
+	var d Decider
+	var d2 Decider
+	ctx := context.Background()
+	rand := rand.New(rand.NewSource(12))
+	loadSplitConfig := testLoadSplitConfig{
+		randSource:    rand,
+		useWeighted:   false,
+		statRetention: 10 * time.Second,
+		statThreshold: 2,
+	}
+	samplingNotifier := NewReplicaSamplingNotifier()
+	Init(&d, &loadSplitConfig, testLoadSplitterMetrics(),
+		SplitQPS, samplingNotifier)
+	Init(&d2, &loadSplitConfig, testLoadSplitterMetrics(),
+		SplitQPS, samplingNotifier)
+
+	// helper functions for recording data
+	load := func(n int) func(SplitObjective) int {
+		return func(SplitObjective) int {
+			return n
+		}
+	}
+	span := func() roachpb.Span { return roachpb.Span{} }
+
+	// populate the decider's time values
+	now := time.Unix(0, 0)
+	d.Record(ctx, now, load(0), span)
+	d2.Record(ctx, now, load(0), span)
+
+	t1 := time.Unix(1, 1)
+	// Put d over threshold
+	// Do not put d2 over threshold
+	d.Record(ctx, t1, load(3), span)
+	d2.Record(ctx, t1, load(1), span)
+	assert.Equal(t, int32(1), samplingNotifier.count)
+
+	t2 := time.Unix(2, 2)
+	// Put d2 over threshold
+	d2.Record(ctx, t2, load(3), span)
+	assert.Equal(t, int32(2), samplingNotifier.count)
+
+	t3 := time.Unix(3, 3)
+	// Put d under threshold
+	d.Record(ctx, t3, load(0), span)
+	assert.Equal(t, int32(1), samplingNotifier.count)
+
+	// reset d2
+	d2.Reset(context.Background(), t3)
+	assert.Equal(t, int32(0), samplingNotifier.count)
 }

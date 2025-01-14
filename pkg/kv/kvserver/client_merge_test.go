@@ -4549,8 +4549,8 @@ func TestMergeQueue(t *testing.T) {
 			// not leak over between subtests. Then, bump the manual clock so that
 			// both range's load-based splitters consider their measurements to be
 			// reliable.
-			lhs().LoadBasedSplitter().Reset(tc.Servers[0].Clock().PhysicalTime())
-			rhs().LoadBasedSplitter().Reset(tc.Servers[1].Clock().PhysicalTime())
+			lhs().LoadBasedSplitter().Reset(context.Background(), tc.Servers[0].Clock().PhysicalTime())
+			rhs().LoadBasedSplitter().Reset(context.Background(), tc.Servers[1].Clock().PhysicalTime())
 			manualClock.Increment(splitByLoadMergeDelay.Nanoseconds())
 		}
 		for _, splitObjective := range []kvserver.LBRebalancingObjective{
@@ -4561,7 +4561,7 @@ func TestMergeQueue(t *testing.T) {
 			t.Run(fmt.Sprintf("unreliable-lhs-%s", splitObjective.ToDimension().String()), func(t *testing.T) {
 				resetForLoadBasedSubtest(t)
 
-				lhs().LoadBasedSplitter().Reset(tc.Servers[0].Clock().PhysicalTime())
+				lhs().LoadBasedSplitter().Reset(context.Background(), tc.Servers[0].Clock().PhysicalTime())
 
 				clearRange(t, lhsStartKey, rhsEndKey)
 				verifyUnmergedSoon(t, store, lhsStartKey, rhsStartKey)
@@ -4570,7 +4570,7 @@ func TestMergeQueue(t *testing.T) {
 			t.Run(fmt.Sprintf("unreliable-rhs-%s", splitObjective.ToDimension().String()), func(t *testing.T) {
 				resetForLoadBasedSubtest(t)
 
-				rhs().LoadBasedSplitter().Reset(tc.Servers[1].Clock().PhysicalTime())
+				rhs().LoadBasedSplitter().Reset(context.Background(), tc.Servers[1].Clock().PhysicalTime())
 
 				clearRange(t, lhsStartKey, rhsEndKey)
 				verifyUnmergedSoon(t, store, lhsStartKey, rhsStartKey)

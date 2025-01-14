@@ -384,7 +384,7 @@ func (sq *splitQueue) processAttempt(
 		sq.metrics.LoadBasedSplitCount.Inc(1)
 
 		// Reset the splitter now that the bounds of the range changed.
-		r.loadBasedSplitter.Reset(sq.store.Clock().PhysicalTime())
+		r.loadBasedSplitter.Reset(ctx, sq.store.Clock().PhysicalTime())
 		return true, nil
 	}
 

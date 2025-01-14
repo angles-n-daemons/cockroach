@@ -182,6 +182,7 @@ func newUninitializedReplicaWithoutRaftGroup(
 			newReplicaSplitConfig(store.ClusterSettings()),
 			store.metrics.LoadSplitterMetrics,
 			store.rebalanceObjManager.Objective().ToSplitObjective(),
+			store.samplingNotifier,
 		)
 	}
 	r.lastProblemRangeReplicateEnqueueTime.Store(store.Clock().PhysicalTime())

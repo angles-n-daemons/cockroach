@@ -15,6 +15,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/gossip"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvpb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/logstore"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/split"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/storage/disk"
@@ -135,7 +136,7 @@ func TestStoresGetReplicaForRangeID(t *testing.T) {
 		cfg := TestStoreConfig(clock)
 		cfg.Transport = NewDummyRaftTransport(cfg.AmbientCtx, cfg.Settings, cfg.Clock)
 
-		store := NewStore(ctx, cfg, memEngine, &roachpb.NodeDescriptor{NodeID: 1})
+		store := NewStore(ctx, cfg, memEngine, &roachpb.NodeDescriptor{NodeID: 1}, split.NewReplicaSamplingNotifier())
 		// Fake-set an ident. This is usually read from the engine on store.Start()
 		// which we're not even going to call.
 		store.Ident = &roachpb.StoreIdent{StoreID: storeID}
@@ -229,7 +230,7 @@ func createStores(count int) (*timeutil.ManualTime, []*Store, *Stores, *stop.Sto
 		cfg.Transport = NewDummyRaftTransport(cfg.AmbientCtx, cfg.Settings, cfg.Clock)
 		eng := storage.NewDefaultInMemForTesting()
 		stopper.AddCloser(eng)
-		s := NewStore(context.Background(), cfg, eng, &roachpb.NodeDescriptor{NodeID: 1})
+		s := NewStore(context.Background(), cfg, eng, &roachpb.NodeDescriptor{NodeID: 1}, split.NewReplicaSamplingNotifier())
 		storeIDAlloc++
 		s.Ident = &roachpb.StoreIdent{StoreID: storeIDAlloc}
 		stores = append(stores, s)

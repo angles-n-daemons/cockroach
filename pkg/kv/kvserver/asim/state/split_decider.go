@@ -82,7 +82,7 @@ func (s *SplitDecider) newDecider() *split.Decider {
 	split.Init(decider, s.splitConfig, &split.LoadSplitterMetrics{
 		PopularKeyCount: metric.NewCounter(metric.Metadata{}),
 		NoSplitKeyCount: metric.NewCounter(metric.Metadata{}),
-	}, split.SplitQPS)
+	}, split.SplitQPS, split.NewReplicaSamplingNotifier())
 	return decider
 }
 

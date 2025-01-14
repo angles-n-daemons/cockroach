@@ -137,6 +137,10 @@ type Decider struct {
 	loadSplitterMetrics *LoadSplitterMetrics // supplied to Init
 	config              LoadSplitConfig      // supplied to Init
 
+	// samplingNotifier is a store-wide counter which keeps track of how many
+	// deciders are actively sampling for split keys.
+	samplingNotifier *ReplicaSamplingNotifier
+
 	mu struct {
 		syncutil.Mutex
 		objective SplitObjective // supplied to Init
@@ -168,10 +172,12 @@ func Init(
 	config LoadSplitConfig,
 	loadSplitterMetrics *LoadSplitterMetrics,
 	objective SplitObjective,
+	samplingNotifier *ReplicaSamplingNotifier,
 ) {
 	lbs.loadSplitterMetrics = loadSplitterMetrics
 	lbs.config = config
 	lbs.mu.objective = objective
+	lbs.samplingNotifier = samplingNotifier
 }
 
 type lockedDecider Decider
@@ -235,9 +241,13 @@ func (d *Decider) recordLocked(
 		// to be used.
 		if d.mu.lastStatVal >= d.config.StatThreshold(d.mu.objective) {
 			if d.mu.splitFinder == nil {
+				d.samplingNotifier.Inc(ctx)
 				d.mu.splitFinder = d.config.NewLoadBasedSplitter(now, d.mu.objective)
 			}
 		} else {
+			if d.mu.splitFinder != nil {
+				d.samplingNotifier.Dec(ctx)
+			}
 			d.mu.splitFinder = nil
 		}
 	}
@@ -352,18 +362,21 @@ func (d *Decider) MaybeSplitKey(ctx context.Context, now time.Time) roachpb.Key 
 
 // Reset deactivates any current attempt at determining a split key. The method
 // also discards any historical stat tracking information.
-func (d *Decider) Reset(now time.Time) {
+func (d *Decider) Reset(ctx context.Context, now time.Time) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	d.resetLocked(now)
+	d.resetLocked(ctx, now)
 }
 
-func (d *Decider) resetLocked(now time.Time) {
+func (d *Decider) resetLocked(ctx context.Context, now time.Time) {
 	d.mu.lastStatRollover = time.Time{}
 	d.mu.lastStatVal = 0
 	d.mu.count = 0
 	d.mu.maxStat.reset(now, d.config.StatRetention())
+	if d.mu.splitFinder != nil {
+		d.samplingNotifier.Dec(ctx)
+	}
 	d.mu.splitFinder = nil
 	d.mu.suggestionsMade = 0
 	d.mu.lastSplitSuggestion = time.Time{}
@@ -372,12 +385,12 @@ func (d *Decider) resetLocked(now time.Time) {
 
 // SetSplitObjective sets the decider split objective to the given value and
 // discards any existing state.
-func (d *Decider) SetSplitObjective(now time.Time, obj SplitObjective) {
+func (d *Decider) SetSplitObjective(ctx context.Context, now time.Time, obj SplitObjective) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
 	d.mu.objective = obj
-	d.resetLocked(now)
+	d.resetLocked(ctx, now)
 }
 
 // LoadSplitSnapshot contains a consistent snapshot of the decider state. It

@@ -445,7 +445,7 @@ func (r *Replica) leasePostApplyLocked(
 		if r.loadStats != nil {
 			r.loadStats.Reset()
 		}
-		r.loadBasedSplitter.Reset(r.Clock().PhysicalTime())
+		r.loadBasedSplitter.Reset(ctx, r.Clock().PhysicalTime())
 	}
 
 	// Inform the concurrency manager that the lease holder has been updated.
