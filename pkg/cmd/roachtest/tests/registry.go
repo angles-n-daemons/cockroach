@@ -172,5 +172,6 @@ func RegisterTests(r registry.Registry) {
 	registerMultiRegionSystemDatabase(r)
 	registerSqlStatsMixedVersion(r)
 	registerDbConsole(r)
+	registerStatusServerMixedVersion(r)
 	perturbation.RegisterTests(r)
 }

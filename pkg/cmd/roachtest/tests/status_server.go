@@ -20,10 +20,15 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachprod/install"
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
+	"github.com/stretchr/testify/require"
 )
 
 func runStatusServer(ctx context.Context, t test.Test, c cluster.Cluster) {
 	c.Start(ctx, t.L(), option.DefaultStartOpts(), install.MakeClusterSettings())
+	runStatusServerTests(ctx, t, c)
+}
+
+func runStatusServerTests(ctx context.Context, t test.Test, c cluster.Cluster) {
 	// The status endpoints below may take a while to produce their answer, maybe more
 	// than the 3 second timeout of the default http client.
 	client := roachtestutil.DefaultHTTPClient(c, t.L(), roachtestutil.HTTPTimeout(15*time.Second))
@@ -31,7 +36,7 @@ func runStatusServer(ctx context.Context, t test.Test, c cluster.Cluster) {
 	// Get the ids for each node.
 	idMap := make(map[int]roachpb.NodeID)
 	urlMap := make(map[int]string)
-	adminUIAddrs, err := c.ExternalAdminUIAddr(ctx, t.L(), c.All())
+	adminUIAddrs, err := c.ExternalAdminUIAddr(ctx, t.L(), c.CRDBNodes())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,14 +76,14 @@ func runStatusServer(ctx context.Context, t test.Test, c cluster.Cluster) {
 	// checkNode checks all the endpoints of the status server hosted by node and
 	// requests info for the node with otherNodeID. That node could be the same
 	// other node, the same node or "local".
-	checkNode := func(url string, nodeID, otherNodeID, expectedNodeID roachpb.NodeID) {
+	checkNode := func(u string, nodeID, otherNodeID, expectedNodeID roachpb.NodeID) {
 		urlIDs := []string{otherNodeID.String()}
 		if nodeID == otherNodeID {
 			urlIDs = append(urlIDs, "local")
 		}
 		var details serverpb.DetailsResponse
 		for _, urlID := range urlIDs {
-			if err := client.GetJSON(ctx, url+`/_status/details/`+urlID, &details); err != nil {
+			if err := client.GetJSON(ctx, u+`/_status/details/`+urlID, &details); err != nil {
 				t.Fatalf("unable to parse details - %s", err)
 			}
 			if details.NodeID != expectedNodeID {
@@ -86,21 +91,24 @@ func runStatusServer(ctx context.Context, t test.Test, c cluster.Cluster) {
 					nodeID, urlID, expectedNodeID, details.NodeID)
 			}
 			endpoints := []string{
-				fmt.Sprintf("%s/_status/gossip/%s", url, urlID),
-				fmt.Sprintf("%s/_status/nodes/%s", url, urlID),
-				fmt.Sprintf("%s/_status/logfiles/%s", url, urlID),
-				fmt.Sprintf("%s/_status/logs/%s", url, urlID),
-				fmt.Sprintf("%s/_status/stacks/%s", url, urlID),
+				fmt.Sprintf("%s/_status/gossip/%s", u, urlID),
+				fmt.Sprintf("%s/_status/nodes/%s", u, urlID),
+				fmt.Sprintf("%s/_status/logfiles/%s", u, urlID),
+				fmt.Sprintf("%s/_status/logs/%s", u, urlID),
+				fmt.Sprintf("%s/_status/stacks/%s", u, urlID),
 			}
 			for _, endpoint := range endpoints {
 				get(endpoint, client)
 			}
 		}
-		get(url+"/_status/vars", client)
+		get(u+"/_status/vars", client)
+
+		err := checkHotRanges(ctx, client, u)
+		require.NoError(t, err)
 	}
 
 	// Check local response for the every node.
-	for i := 1; i <= c.Spec().NodeCount; i++ {
+	for i := 1; i <= len(c.CRDBNodes()); i++ {
 		id := idMap[i]
 		checkNode(urlMap[i], id, id, id)
 		get(urlMap[i]+"/_status/nodes", client)
@@ -108,7 +116,7 @@ func runStatusServer(ctx context.Context, t test.Test, c cluster.Cluster) {
 
 	// Proxy from the first node to the last node.
 	firstNode := 1
-	lastNode := c.Spec().NodeCount
+	lastNode := len(c.CRDBNodes())
 	firstID := idMap[firstNode]
 	lastID := idMap[lastNode]
 	checkNode(urlMap[firstNode], firstID, lastID, lastID)
@@ -118,4 +126,18 @@ func runStatusServer(ctx context.Context, t test.Test, c cluster.Cluster) {
 
 	// And from the last node to the last node.
 	checkNode(urlMap[lastNode], lastID, lastID, lastID)
+}
+
+func checkHotRanges(
+	ctx context.Context, client *roachtestutil.RoachtestHTTPClient, u string,
+) error {
+	res := &serverpb.HotRangesResponseV2{}
+	err := client.PostProtobuf(ctx, fmt.Sprintf("%s/_status/v2/hotranges", u), &serverpb.HotRangesRequest{}, res)
+	if err != nil {
+		return err
+	}
+	if len(res.Ranges) == 0 {
+		return fmt.Errorf("expected at least one range in hot ranges call")
+	}
+	return nil
 }
