@@ -13,6 +13,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/allocator"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/allocator/load"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvflowcontrol/rac2"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/split"
 	"github.com/cockroachdb/cockroach/pkg/raft"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
@@ -48,6 +49,9 @@ type CandidateReplica interface {
 	// RangeUsageInfo returns usage information (sizes and traffic) needed by
 	// the allocator to make rebalancing decisions for a given range.
 	RangeUsageInfo() allocator.RangeUsageInfo
+	// SplitStatistics returns information collected by the range's
+	// split finders.
+	SplitStatistics() *split.SplitStatistics
 	// BasicSendStreamStats populates the range's flow control send stream stats
 	// into the provided struct, iff the replica is the raft leader and RACv2 is
 	// enabled, otherwise nil.
@@ -67,7 +71,8 @@ type CandidateReplica interface {
 
 type candidateReplica struct {
 	*Replica
-	usage allocator.RangeUsageInfo
+	usage      allocator.RangeUsageInfo
+	splitStats *split.SplitStatistics
 }
 
 // RangeUsageInfo returns usage information (sizes and traffic) needed by
@@ -81,6 +86,12 @@ func (cr candidateReplica) RangeUsageInfo() allocator.RangeUsageInfo {
 // simulator.
 func (cr candidateReplica) Repl() *Replica {
 	return cr.Replica
+}
+
+// SplitStatistics returns information about the key accesses to the
+// replica, collected by its split finders.
+func (cr candidateReplica) SplitStatistics() *split.SplitStatistics {
+	return cr.splitStats
 }
 
 // ReplicaRankings maintains top-k orderings of the replicas in a store by QPS.

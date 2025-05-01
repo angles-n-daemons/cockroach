@@ -53,6 +53,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/raftentry"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/rangefeed"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/rditer"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/split"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/storeliveness"
 	slpb "github.com/cockroachdb/cockroach/pkg/kv/kvserver/storeliveness/storelivenesspb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/tenantrate"
@@ -3184,6 +3185,7 @@ func (s *Store) Capacity(ctx context.Context, useCached bool) (roachpb.StoreCapa
 			leaseCount++
 		}
 		usage := r.RangeUsageInfo()
+		splitStats := r.loadBasedSplitter.SplitStatistics()
 		logicalBytes += usage.LogicalBytes
 		bytesPerReplica = append(bytesPerReplica, float64(usage.LogicalBytes))
 		// TODO(a-robinson): How dangerous is it that these numbers will be
@@ -3196,8 +3198,9 @@ func (s *Store) Capacity(ctx context.Context, useCached bool) (roachpb.StoreCapa
 		totalWritesPerSecond += usage.WritesPerSecond
 		writesPerReplica = append(writesPerReplica, usage.WritesPerSecond)
 		cr := candidateReplica{
-			Replica: r,
-			usage:   usage,
+			Replica:    r,
+			usage:      usage,
+			splitStats: splitStats,
 		}
 		rankingsAccumulator.AddReplica(cr)
 		rankingsByTenantAccumulator.AddReplica(cr)
@@ -3847,6 +3850,7 @@ type HotReplicaInfo struct {
 	WriteBytesPerSecond float64
 	ReadBytesPerSecond  float64
 	CPUTimePerSecond    float64
+	SplitStatistics     *split.SplitStatistics
 }
 
 // HottestReplicas returns the hottest replicas on a store, sorted by their
@@ -3879,6 +3883,7 @@ func mapToHotReplicasInfo(repls []CandidateReplica) []HotReplicaInfo {
 		hotRepls[i].WriteBytesPerSecond = ri.WriteBytesPerSecond
 		hotRepls[i].ReadBytesPerSecond = ri.ReadBytesPerSecond
 		hotRepls[i].CPUTimePerSecond = ri.RaftCPUNanosPerSecond + ri.RequestCPUNanosPerSecond
+		hotRepls[i].SplitStatistics = repls[i].SplitStatistics()
 	}
 	return hotRepls
 }

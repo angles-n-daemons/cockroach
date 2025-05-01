@@ -13,6 +13,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/allocator"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/asim/state"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvflowcontrol/rac2"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/split"
 	"github.com/cockroachdb/cockroach/pkg/raft"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
@@ -88,6 +89,11 @@ func (sr *simulatorReplica) Desc() *roachpb.RangeDescriptor {
 // the allocator to make rebalancing decisions for a given range.
 func (sr *simulatorReplica) RangeUsageInfo() allocator.RangeUsageInfo {
 	return sr.usage
+}
+
+// SplitStatistics aren't used by the rebalancer.
+func (sr *simulatorReplica) SplitStatistics() *split.SplitStatistics {
+	return nil
 }
 
 // AdminTransferLease transfers the LeaderLease to another replica.
