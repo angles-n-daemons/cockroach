@@ -58,6 +58,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/tscache"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/txnrecovery"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/txnwait"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvstats"
 	"github.com/cockroachdb/cockroach/pkg/multitenant/tenantcapabilities/tenantcapabilitiesauthorizer"
 	"github.com/cockroachdb/cockroach/pkg/raft"
 	"github.com/cockroachdb/cockroach/pkg/raft/raftlogger"
@@ -1338,6 +1339,9 @@ type StoreConfig struct {
 	// RangeCount is populated by the node and represents the total number of
 	// ranges this node has.
 	RangeCount *atomic.Int64
+
+	// KVStatsCollector is used to collect KV stats for the store.
+	KVStats *kvstats.Collector
 }
 
 // logRangeAndNodeEventsEnabled is used to enable or disable logging range events

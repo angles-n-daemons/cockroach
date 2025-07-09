@@ -38,6 +38,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/split"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/stateloader"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/tenantrate"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvstats"
 	"github.com/cockroachdb/cockroach/pkg/raft"
 	"github.com/cockroachdb/cockroach/pkg/raft/raftpb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
@@ -1073,6 +1074,8 @@ type Replica struct {
 	// changes, leaseholder changes, and periodically at the interval of
 	// kv.closed_timestamp.policy_refresh_interval by PolicyRefresher.
 	cachedClosedTimestampPolicy atomic.Pointer[ctpb.RangeClosedTimestampPolicy]
+
+	sampler *kvstats.Collector
 }
 
 // String returns the string representation of the replica using an

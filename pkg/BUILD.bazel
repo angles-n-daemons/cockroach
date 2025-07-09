@@ -1616,6 +1616,7 @@ GO_TARGETS = [
     "//pkg/kv/kvserver/uncertainty:uncertainty_test",
     "//pkg/kv/kvserver:kvserver",
     "//pkg/kv/kvserver:kvserver_test",
+    "//pkg/kv/kvstats:kvstats",
     "//pkg/kv/kvtestutils:kvtestutils",
     "//pkg/kv:kv",
     "//pkg/kv:kv_test",

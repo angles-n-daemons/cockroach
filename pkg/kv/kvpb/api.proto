@@ -3028,6 +3028,8 @@ message Header {
   // the server.
   bool has_buffered_all_preceding_writes = 37;
 
+  bool collect_stats = 38;
+  
   reserved 7, 10, 12, 14, 20;
 
   // Next ID: 38

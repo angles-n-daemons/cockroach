@@ -7,9 +7,12 @@ package kvserver
 
 import (
 	"context"
+	fmt "fmt"
+	"os"
 	"reflect"
 	"runtime/pprof"
 	"runtime/trace"
+	"strings"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/kv/kvpb"
@@ -23,6 +26,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/replicastats"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/spanset"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/txnwait"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvstats"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
@@ -78,7 +82,9 @@ var optimisticEvalLimitedScans = settings.RegisterBoolSetting(
 //	  Replica.maybeCommitWaitBeforeCommitTrigger (if committing with commit-trigger)
 //	                       │
 //
-// read-write ◄─────────────────────────┴────────────────────────► read-only
+// read-write
+// ◄─────────────────────────┴────────────────────────►
+// read-only
 //
 //	│                                                               │
 //	│                                                               │
@@ -179,14 +185,17 @@ func (r *Replica) SendWithWriteBytes(
 	var br *kvpb.BatchResponse
 	var pErr *kvpb.Error
 	var writeBytes *kvadmission.StoreWriteBytes
+	var waitTime time.Duration
 	if isReadOnly {
 		log.Event(ctx, "read-only path")
 		fn := (*Replica).executeReadOnlyBatch
-		br, _, pErr = r.executeBatchWithConcurrencyRetries(ctx, ba, fn)
+		// get lock time here
+		br, _, waitTime, pErr = r.executeBatchWithConcurrencyRetries(ctx, ba, fn)
 	} else if ba.IsWrite() {
 		log.Event(ctx, "read-write path")
 		fn := (*Replica).executeWriteBatch
-		br, writeBytes, pErr = r.executeBatchWithConcurrencyRetries(ctx, ba, fn)
+		// get lock time here
+		br, writeBytes, waitTime, pErr = r.executeBatchWithConcurrencyRetries(ctx, ba, fn)
 	} else if ba.IsAdmin() {
 		log.Event(ctx, "admin path")
 		br, pErr = r.executeAdminBatch(ctx, ba)
@@ -206,6 +215,8 @@ func (r *Replica) SendWithWriteBytes(
 		}
 	}
 
+	cputime := grunning.Difference(startCPU, grunning.Time())
+	var span roachpb.Span = roachpb.Span{}
 	if pErr == nil {
 		// Return range information if it was requested. Note that we don't return it
 		// on errors because the code doesn't currently support returning both a br
@@ -213,15 +224,54 @@ func (r *Replica) SendWithWriteBytes(
 		// ways of returning range info.
 		r.maybeAddRangeInfoToResponse(ctx, ba, br)
 		// Handle load-based splitting, if necessary.
-		r.recordBatchForLoadBasedSplitting(ctx, ba, br, int(grunning.Difference(startCPU, grunning.Time())))
+		span = getResponseBoundarySpan(ba, br)
+		r.recordBatchForLoadBasedSplitting(ctx, ba, br, int(cputime))
 	}
 
-	// Record summary throughput information about the batch request for
-	// accounting.
-	r.recordBatchRequestLoad(ctx, ba)
-	r.recordRequestWriteBytes(writeBytes)
-	r.recordImpactOnRateLimiter(ctx, br, isReadOnly)
+	wb := int64(0)
+	if writeBytes != nil {
+		wb = writeBytes.WriteBytes
+	}
+
+	sample := kvstats.Sample{
+		Span:       span,
+		CPUTime:    int64(cputime),
+		WaitTime:   waitTime.Nanoseconds(),
+		WriteBytes: wb,
+	}
+	qq("kv stat: ", sample.Span)
+	qq("cpu time: ", cputime)
+	qq("wait time: ", waitTime)
+	qq("write bytes: ", wb)
+
+	if r.store.cfg.KVStats != nil {
+		r.store.cfg.KVStats.Record(ctx, sample)
+	}
+	// Return the stats in the batch response if requested by the client.
+	// if ba.Header.collect_stats {
+	// 	br.Header.Stats = sample.toProto()
+	// }
+
 	return br, writeBytes, pErr
+}
+
+func qq(args ...any) {
+	tempDir := os.TempDir()
+	file, err := os.OpenFile(tempDir+"/q", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		panic(err)
+	}
+	defer file.Close()
+	templateArr := []string{}
+	for range args {
+		templateArr = append(templateArr, "%v")
+	}
+	template := strings.Join(templateArr, " ") + "\n"
+	text := fmt.Sprintf(template, args...)
+	_, err = file.WriteString(text)
+	if err != nil {
+		panic(err)
+	}
 }
 
 // maybeCommitWaitBeforeCommitTrigger detects batches that are attempting to
@@ -419,12 +469,18 @@ var _ batchExecutionFn = (*Replica).executeReadOnlyBatch
 // handles the process of retrying batch execution after addressing the error.
 func (r *Replica) executeBatchWithConcurrencyRetries(
 	ctx context.Context, ba *kvpb.BatchRequest, fn batchExecutionFn,
-) (br *kvpb.BatchResponse, writeBytes *kvadmission.StoreWriteBytes, pErr *kvpb.Error) {
+) (
+	br *kvpb.BatchResponse,
+	writeBytes *kvadmission.StoreWriteBytes,
+	waitTime time.Duration,
+	pErr *kvpb.Error,
+) {
 	// Try to execute command; exit retry loop on success.
 	var latchSpans *spanset.SpanSet
 	var lockSpans *lockspanset.LockSpanSet
 	var requestEvalKind concurrency.RequestEvalKind
 	var g *concurrency.Guard
+	var totalWaitTime time.Duration
 	defer func() {
 		// NB: wrapped to delay g evaluation to its value when returning.
 		if g != nil {
@@ -440,7 +496,7 @@ func (r *Replica) executeBatchWithConcurrencyRetries(
 	for {
 		// Exit loop if context has been canceled or timed out.
 		if err := ctx.Err(); err != nil {
-			return nil, nil, kvpb.NewError(err)
+			return nil, nil, totalWaitTime, kvpb.NewError(err)
 		}
 
 		// Determine the maximal set of key spans that the batch will operate on.
@@ -453,7 +509,7 @@ func (r *Replica) executeBatchWithConcurrencyRetries(
 			var err error
 			latchSpans, lockSpans, requestEvalKind, err = r.collectSpans(ba)
 			if err != nil {
-				return nil, nil, kvpb.NewError(err)
+				return nil, nil, totalWaitTime, kvpb.NewError(err)
 			}
 		}
 
@@ -462,6 +518,8 @@ func (r *Replica) executeBatchWithConcurrencyRetries(
 		// to ensure that the request has full isolation during evaluation. This
 		// returns a request guard that must be eventually released.
 		var resp []kvpb.ResponseUnion
+		waitStart := timeutil.Now()
+		// is this a possible entrypoint to determine total wait time?
 		g, resp, pErr = r.concMgr.SequenceReq(ctx, g, concurrency.Request{
 			Txn:             ba.Txn,
 			Timestamp:       ba.Timestamp,
@@ -477,6 +535,8 @@ func (r *Replica) executeBatchWithConcurrencyRetries(
 			LockSpans:       lockSpans,  // nil if g != nil
 			Batch:           ba,
 		}, requestEvalKind)
+
+		totalWaitTime += timeutil.Since(waitStart)
 		if pErr != nil {
 			if poisonErr := (*poison.PoisonedError)(nil); errors.As(pErr.GoError(), &poisonErr) {
 				// It's possible that intent resolution accessed txn info anchored on a
@@ -499,21 +559,21 @@ func (r *Replica) executeBatchWithConcurrencyRetries(
 					)))
 				}
 			}
-			return nil, nil, pErr
+			return nil, nil, totalWaitTime, pErr
 		} else if resp != nil {
 			br = new(kvpb.BatchResponse)
 			br.Responses = resp
-			return br, nil, nil
+			return br, nil, totalWaitTime, nil
 		}
 		latchSpans, lockSpans = nil, nil // ownership released
 
 		br, g, writeBytes, pErr = fn(r, ctx, ba, g)
 		if pErr == nil {
 			// Success.
-			return br, writeBytes, nil
+			return br, writeBytes, totalWaitTime, nil
 		} else if !isConcurrencyRetryError(pErr) {
 			// Propagate error.
-			return nil, nil, pErr
+			return nil, nil, totalWaitTime, pErr
 		}
 
 		log.VErrEventf(ctx, 2, "concurrency retry error: %s", pErr)
@@ -550,13 +610,13 @@ func (r *Replica) executeBatchWithConcurrencyRetries(
 			// Drop latches, but retain lock wait-queues.
 			g.AssertLatches()
 			if g, pErr = r.handleLockConflictError(ctx, ba, g, pErr, t); pErr != nil {
-				return nil, nil, pErr
+				return nil, nil, totalWaitTime, pErr
 			}
 		case *kvpb.TransactionPushError:
 			// Drop latches, but retain lock wait-queues.
 			g.AssertLatches()
 			if g, pErr = r.handleTransactionPushError(ctx, ba, g, pErr, t); pErr != nil {
-				return nil, nil, pErr
+				return nil, nil, totalWaitTime, pErr
 			}
 		case *kvpb.IndeterminateCommitError:
 			dropLatchesAndLockWaitQueues(true /* reuseLatchAndLockSpans */)
@@ -564,7 +624,7 @@ func (r *Replica) executeBatchWithConcurrencyRetries(
 			// is returned if the transaction is recovered successfully to either a
 			// COMMITTED or ABORTED state.
 			if pErr = r.handleIndeterminateCommitError(ctx, ba, pErr, t); pErr != nil {
-				return nil, nil, pErr
+				return nil, nil, totalWaitTime, pErr
 			}
 		case *kvpb.ReadWithinUncertaintyIntervalError:
 			// If the batch is able to perform a server-side retry in order to avoid
@@ -580,7 +640,7 @@ func (r *Replica) executeBatchWithConcurrencyRetries(
 			// propagate it.
 			ba, pErr = r.handleReadWithinUncertaintyIntervalError(ctx, ba, pErr, t)
 			if pErr != nil {
-				return nil, nil, pErr
+				return nil, nil, totalWaitTime, pErr
 			}
 		case *kvpb.InvalidLeaseError:
 			dropLatchesAndLockWaitQueues(true /* reuseLatchAndLockSpans */)
@@ -588,13 +648,13 @@ func (r *Replica) executeBatchWithConcurrencyRetries(
 			// replica or redirect to the current leaseholder if currently held
 			// by a different replica.
 			if pErr = r.handleInvalidLeaseError(ctx, ba); pErr != nil {
-				return nil, nil, pErr
+				return nil, nil, totalWaitTime, pErr
 			}
 		case *kvpb.MergeInProgressError:
 			dropLatchesAndLockWaitQueues(true /* reuseLatchAndLockSpans */)
 			// Then listen for the merge to complete.
 			if pErr = r.handleMergeInProgressError(ctx, ba, pErr, t); pErr != nil {
-				return nil, nil, pErr
+				return nil, nil, totalWaitTime, pErr
 			}
 		case *kvpb.OptimisticEvalConflictsError:
 			// We are deliberately not dropping latches. Note that the latches are

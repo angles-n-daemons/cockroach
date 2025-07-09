@@ -185,6 +185,7 @@ go_library(
         "//pkg/kv/kvserver/txnrecovery",
         "//pkg/kv/kvserver/txnwait",
         "//pkg/kv/kvserver/uncertainty",
+        "//pkg/kv/kvstats",
         "//pkg/multitenant",
         "//pkg/multitenant/tenantcapabilities/tenantcapabilitiesauthorizer",
         "//pkg/multitenant/tenantcostmodel",

@@ -1,0 +1,21 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "kvstats",
+    srcs = [
+        "collector.go",
+        "index_stats.go",
+        "kvstats.go",
+        "task.go",
+    ],
+    importpath = "github.com/cockroachdb/cockroach/pkg/kv/kvstats",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//pkg/keys",
+        "//pkg/roachpb",
+        "//pkg/settings",
+        "//pkg/util/container/ring",
+        "//pkg/util/log",
+        "//pkg/util/stop",
+    ],
+)

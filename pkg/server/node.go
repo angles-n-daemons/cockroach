@@ -35,6 +35,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvstorage"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/liveness/livenesspb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/rangefeed"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvstats"
 	"github.com/cockroachdb/cockroach/pkg/multitenant"
 	"github.com/cockroachdb/cockroach/pkg/multitenant/tenantcapabilities"
 	"github.com/cockroachdb/cockroach/pkg/multitenant/tenantcapabilities/tenantcapabilitieswatcher"
@@ -683,6 +684,14 @@ func (n *Node) start(
 		sem = quotapool.NewIntPool("store start concurrency", 1)
 	}
 	engineErrC := make(chan error, len(state.initializedEngines))
+
+	// Create the kv statistics collection subsystem.
+	collector, err := kvstats.Init(ctx, n.stopper)
+	if err != nil {
+		return errors.Wrap(err, "failed to initialize kv stats collector")
+	}
+	n.storeCfg.KVStats = collector
+
 	for i := range state.initializedEngines {
 		engine := state.initializedEngines[i]
 		err := n.stopper.RunAsyncTaskEx(ctx,

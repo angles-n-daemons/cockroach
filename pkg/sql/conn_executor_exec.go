@@ -3043,6 +3043,7 @@ func (ex *connExecutor) dispatchToExecutionEngine(
 
 	// TODO(sql-sessions): fix the phase time for pausable portals.
 	// https://github.com/cockroachdb/cockroach/issues/99410
+	// mark execstart
 	ex.statsCollector.PhaseTimes().SetSessionPhaseTime(sessionphase.PlannerStartExecStmt, crtime.NowMono())
 
 	progAtomic, err := func() (*uint64, error) {
@@ -3102,6 +3103,7 @@ func (ex *connExecutor) dispatchToExecutionEngine(
 	ex.sessionTracing.TraceExecEnd(ctx, res.Err(), res.RowsAffected())
 	// TODO(sql-sessions): fix the phase time for pausable portals.
 	// https://github.com/cockroachdb/cockroach/issues/99410
+	// mark execend
 	ex.statsCollector.PhaseTimes().SetSessionPhaseTime(sessionphase.PlannerEndExecStmt, crtime.NowMono())
 
 	ex.extraTxnState.rowsRead += stats.rowsRead

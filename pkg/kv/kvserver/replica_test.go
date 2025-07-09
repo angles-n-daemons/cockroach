@@ -7559,7 +7559,7 @@ func TestReplicaCancelRaft(t *testing.T) {
 			if err := ba.SetActiveTimestamp(tc.Clock()); err != nil {
 				t.Fatal(err)
 			}
-			_, _, pErr := tc.repl.executeBatchWithConcurrencyRetries(ctx, ba, (*Replica).executeWriteBatch)
+			_, _, _, pErr := tc.repl.executeBatchWithConcurrencyRetries(ctx, ba, (*Replica).executeWriteBatch)
 			if cancelEarly {
 				if !testutils.IsPError(pErr, context.Canceled.Error()) {
 					t.Fatalf("expected canceled error; got %v", pErr)
@@ -7615,7 +7615,7 @@ func TestReplicaAbandonProposal(t *testing.T) {
 	ba.Add(&kvpb.PutRequest{
 		RequestHeader: kvpb.RequestHeader{Key: []byte("acdfg")},
 	})
-	_, _, pErr := tc.repl.executeBatchWithConcurrencyRetries(ctx, ba, (*Replica).executeWriteBatch)
+	_, _, _, pErr := tc.repl.executeBatchWithConcurrencyRetries(ctx, ba, (*Replica).executeWriteBatch)
 	if pErr == nil {
 		t.Fatal("expected failure, but found success")
 	}
@@ -7756,7 +7756,7 @@ func TestReplicaRetryRaftProposal(t *testing.T) {
 	iArg := incrementArgs(roachpb.Key("b"), expInc)
 	ba.Add(iArg)
 	{
-		_, _, pErr := tc.repl.executeBatchWithConcurrencyRetries(
+		_, _, _, pErr := tc.repl.executeBatchWithConcurrencyRetries(
 			context.WithValue(ctx, magicKey{}, "foo"),
 			ba,
 			(*Replica).executeWriteBatch,
@@ -7790,7 +7790,7 @@ func TestReplicaRetryRaftProposal(t *testing.T) {
 			Lease:     lease,
 			PrevLease: prevLease,
 		})
-		_, _, pErr := tc.repl.executeBatchWithConcurrencyRetries(
+		_, _, _, pErr := tc.repl.executeBatchWithConcurrencyRetries(
 			context.WithValue(ctx, magicKey{}, "foo"),
 			ba,
 			(*Replica).executeWriteBatch,
