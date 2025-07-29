@@ -8,6 +8,7 @@ package sql
 import (
 	"context"
 	"fmt"
+	"os"
 	"slices"
 	"strings"
 
@@ -32,6 +33,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlerrors"
 	"github.com/cockroachdb/cockroach/pkg/sql/syntheticprivilege"
+	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/log/eventpb"
 	"github.com/cockroachdb/errors"
 )
 
@@ -119,6 +122,14 @@ func (p *planner) HasPrivilege(
 	// with an invalid API usage.
 	if p.txn == nil {
 		return false, errors.AssertionFailedf("cannot use CheckPrivilege without a txn")
+	}
+
+	// Check for system table access restrictions before any admin bypasses
+	if d, ok := privilegeObject.(catalog.Descriptor); ok && catalog.IsSystemDescriptor(d) {
+		if err := p.assertUnsafeInternalsAccess(ctx); err != nil {
+			qq("descriptor check failed", d.GetName())
+			return false, err
+		}
 	}
 
 	// root, admin and node user should always have privileges, except NOSQLLOGIN.
@@ -252,19 +263,66 @@ func (p *planner) CheckPrivilegeForUser(
 	// context of support escalations, we need to be able to grant the ability to
 	// view system tables without granting the entire admin role.
 	if d, ok := privilegeObject.(catalog.Descriptor); ok {
-		if catalog.IsSystemDescriptor(d) && privilegeKind == privilege.SELECT {
-			hasViewSystemTablePriv, err := p.HasPrivilege(
-				ctx, syntheticprivilege.GlobalPrivilegeObject, privilege.VIEWSYSTEMTABLE, user,
-			)
-			if err != nil {
-				return err
-			}
-			if hasViewSystemTablePriv {
-				return nil
+		if catalog.IsSystemDescriptor(d) {
+			if privilegeKind == privilege.SELECT {
+				hasViewSystemTablePriv, err := p.HasPrivilege(
+					ctx, syntheticprivilege.GlobalPrivilegeObject, privilege.VIEWSYSTEMTABLE, user,
+				)
+				if err != nil {
+					return err
+				}
+				if hasViewSystemTablePriv {
+					return nil
+				}
 			}
 		}
 	}
 	return insufficientPrivilegeError(user, privilegeKind, privilegeObject)
+}
+
+func (p *planner) assertUnsafeInternalsAccess(ctx context.Context) error {
+	sd := p.EvalContext().SessionData()
+	actx := &p.extendedEvalCtx.ExecCfg.AmbientCtx
+
+	return assertUnsafeInternalsAccessCore(ctx, actx, sd, p.stmt)
+}
+
+func assertUnsafeInternalsAccessCore(
+	ctx context.Context, actx *log.AmbientContext, sd *sessiondata.SessionData, stmt Statement,
+) error {
+	// If the querier is internal, we should allow it.
+	if sd.Internal {
+		return nil
+	}
+
+	// If an override is set, allow access to this virtual table.
+	if sd.AllowUnsafeInternals {
+		// As this is considered a "broken glass" situation, we report the access to the event log.
+		log.EventLog(ctx, actx, &eventpb.UnsafeTableAccess{Query: stmt.SQL})
+		return nil
+	}
+
+	qq("unsafe query debug", "stmt.SQL:", stmt.SQL, "len:", len(stmt.SQL))
+	return sqlerrors.ErrUnsafeTableAccess
+}
+
+func qq(args ...any) {
+	tempDir := os.TempDir()
+	file, err := os.OpenFile(tempDir+"/q", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		panic(err)
+	}
+	defer file.Close()
+	templateArr := []string{}
+	for range args {
+		templateArr = append(templateArr, "%v")
+	}
+	template := strings.Join(templateArr, " ") + "\n"
+	text := fmt.Sprintf(template, args...)
+	_, err = file.WriteString(text)
+	if err != nil {
+		panic(err)
+	}
 }
 
 // CheckPrivilege implements the AuthorizationAccessor interface.

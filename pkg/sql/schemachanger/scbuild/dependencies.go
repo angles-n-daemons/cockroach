@@ -25,6 +25,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/eval"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
+	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/log/eventpb"
 	"github.com/cockroachdb/cockroach/pkg/util/log/logpb"
 	"github.com/cockroachdb/cockroach/pkg/util/uuid"
@@ -243,6 +244,7 @@ type SchemaResolverFactory func(
 	sessionDataStack *sessiondata.Stack,
 	txn *kv.Txn,
 	authAccessor AuthorizationAccessor,
+	ambientCtx *log.AmbientContext,
 ) resolver.SchemaResolver
 
 // EventLogger contains the dependencies required for logging schema change

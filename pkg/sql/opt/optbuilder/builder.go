@@ -7,6 +7,7 @@ package optbuilder
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 
 	"github.com/cockroachdb/cockroach/pkg/clusterversion"
@@ -485,6 +486,8 @@ func (b *Builder) buildStmt(
 			stmt,
 			b.qualifyDataSourceNamesInAST,
 		)
+		fmt.Println("tried delegate", newStmt)
+		fmt.Println("tried delegate", newStmt.String())
 		if err != nil {
 			panic(err)
 		}

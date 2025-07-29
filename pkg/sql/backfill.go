@@ -794,6 +794,7 @@ func (sc *SchemaChanger) validateConstraints(
 					sessiondata.NewStack(NewInternalSessionData(ctx, sc.settings, "validate constraint")),
 					txn.KV(),
 					nil, /* authAccessor */
+					nil, /* ambientCtx */
 				)
 				semaCtx.FunctionResolver = descs.NewDistSQLFunctionResolver(collection, txn.KV())
 				// TODO (rohany): When to release this? As of now this is only going to get released
@@ -1551,7 +1552,7 @@ func ValidateConstraint(
 		ctx context.Context, txn descs.Txn,
 	) error {
 		// Use a schema resolver because we need to resolve types by ID and table by name.
-		resolver := NewSkippingCacheSchemaResolver(txn.Descriptors(), sessiondata.NewStack(sessionData), txn.KV(), nil /* authAccessor */)
+		resolver := NewSkippingCacheSchemaResolver(txn.Descriptors(), sessiondata.NewStack(sessionData), txn.KV(), nil /* authAccessor */, nil /* ambientCtx */)
 		semaCtx := tree.MakeSemaContext(resolver)
 		semaCtx.FunctionResolver = descs.NewDistSQLFunctionResolver(txn.Descriptors(), txn.KV())
 		defer func() { txn.Descriptors().ReleaseAll(ctx) }()

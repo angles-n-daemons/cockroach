@@ -626,7 +626,7 @@ CREATE TABLE c (a INT, INDEX idx2(a));`,
 		searchPath := ec.SessionData().SearchPath.GetPathArray()
 		ec.SessionData().SearchPath = ec.SessionData().SearchPath.UpdatePaths(append([]string{"test_sc"}, searchPath...))
 		schemaResolver := sql.NewSkippingCacheSchemaResolver(
-			col, ec.SessionDataStack, txn.KV(), planner.(scbuild.AuthorizationAccessor),
+			col, ec.SessionDataStack, txn.KV(), planner.(scbuild.AuthorizationAccessor), nil,
 		)
 
 		// Make sure we're looking at correct default db and search path.
@@ -707,7 +707,7 @@ CREATE INDEX baz_idx ON baz (s);
 		// Set "defaultdb" as current database.
 		ec.SessionData().Database = "defaultdb"
 		schemaResolver := sql.NewSkippingCacheSchemaResolver(
-			col, ec.SessionDataStack, txn.KV(), planner.(scbuild.AuthorizationAccessor),
+			col, ec.SessionDataStack, txn.KV(), planner.(scbuild.AuthorizationAccessor), nil,
 		)
 		// Make sure we're looking at correct default db and search path.
 		require.Equal(t, "defaultdb", schemaResolver.CurrentDatabase())

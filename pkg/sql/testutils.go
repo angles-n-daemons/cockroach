@@ -58,7 +58,7 @@ func CreateTestTableDescriptor(
 		desc, err := NewTableDesc(
 			ctx,
 			nil, /* txn */
-			NewSkippingCacheSchemaResolver(collection, sessiondata.NewStack(sessionData), txn, nil),
+			NewSkippingCacheSchemaResolver(collection, sessiondata.NewStack(sessionData), txn, nil, nil),
 			st,
 			n,
 			db,

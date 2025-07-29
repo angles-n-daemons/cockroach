@@ -476,6 +476,9 @@ func newInternalPlanner(
 	p.schemaResolver.sessionDataStack = sds
 	p.schemaResolver.txn = p.txn
 	p.schemaResolver.authAccessor = p
+	p.schemaResolver.ambientCtx = &execCfg.AmbientCtx
+	p.schemaResolver.stmt = p.stmt
+	qq("planner stmt set", "p.stmt.SQL:", p.stmt.SQL, "sql_len:", len(p.stmt.SQL))
 	p.evalCatalogBuiltins.Init(execCfg.Codec, p.txn, p.Descriptors())
 	p.extendedEvalCtx.CatalogBuiltins = &p.evalCatalogBuiltins
 
@@ -961,6 +964,9 @@ func (p *planner) resetPlanner(
 
 	p.schemaResolver.txn = txn
 	p.schemaResolver.sessionDataStack = p.EvalContext().SessionDataStack
+	p.schemaResolver.ambientCtx = &p.execCfg.AmbientCtx
+	p.schemaResolver.stmt = p.stmt
+	qq("planner stmt set", "p.stmt.SQL:", p.stmt.SQL, "sql_len:", len(p.stmt.SQL))
 	p.evalCatalogBuiltins.Init(p.execCfg.Codec, txn, p.Descriptors())
 	p.skipDescriptorCache = false
 	p.typeResolutionDbID = descpb.InvalidID

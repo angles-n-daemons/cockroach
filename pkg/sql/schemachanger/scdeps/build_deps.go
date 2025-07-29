@@ -71,7 +71,7 @@ func NewBuilderDependencies(
 		astFormatter:    astFormatter,
 		featureChecker:  featureChecker,
 		schemaResolver: schemaResolverFactory(
-			txn.Descriptors(), sessiondata.NewStack(sessionData), txn.KV(), authAccessor,
+			txn.Descriptors(), sessiondata.NewStack(sessionData), txn.KV(), authAccessor, nil,
 		),
 		clientNoticeSender:       clientNoticeSender,
 		eventLogger:              eventLogger,
