@@ -122,10 +122,10 @@ func (p *planner) HasPrivilege(
 		return false, errors.AssertionFailedf("cannot use CheckPrivilege without a txn")
 	}
 
-	// Check for system table access restrictions before any admin bypasses
+	// Do a safety check on the object, if it is considered unsafe
+	// does the user have the appropriate session data to access it?
 	if d, ok := privilegeObject.(catalog.TableDescriptor); ok {
-		// Check for system table access restrictions before any admin bypasses
-		if catalog.IsSystemDescriptor(d) {
+		if p.tableIsUnsafe(ctx, d) {
 			if err := unsafesql.CheckInternalsAccess(p.SessionData()); err != nil {
 				return false, err
 			}
@@ -951,6 +951,21 @@ func (p *planner) HasViewActivityOrViewActivityRedactedRole(
 	return false, false, nil
 }
 
+func (p *planner) tableIsUnsafe(ctx context.Context, d catalog.TableDescriptor) bool {
+	// All system descriptors are considered unsafe.
+	if catalog.IsSystemDescriptor(d) {
+		return true
+	}
+
+	// Unsupported crdb_internal tables are considered unsafe.
+	if d.GetParentSchemaID() == catconstants.CrdbInternalID {
+		if _, ok := SupportedCRDBInternalTables[d.GetName()]; !ok {
+			return true
+		}
+	}
+
+	return false
+}
 func insufficientPrivilegeError(
 	user username.SQLUsername, kind privilege.Kind, object privilege.Object,
 ) error {
