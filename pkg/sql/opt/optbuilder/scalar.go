@@ -548,7 +548,7 @@ func (b *Builder) buildFunction(
 	overload := f.ResolvedOverload()
 	if overload.HasSQLBody() {
 		return b.buildUDF(f, def, inScope, outScope, outCol, colRefs)
-	} else if isUnsafeBuiltin(overload, def) {
+	} else if b.isUnsafeBuiltin(overload, def) {
 		if err := unsafesql.CheckInternalsAccess(b.evalCtx.SessionData()); err != nil {
 			panic(err)
 		}
@@ -884,6 +884,24 @@ func (b *Builder) constructUnary(
 	panic(errors.AssertionFailedf("unhandled unary operator: %s", redact.Safe(un)))
 }
 
+func (b *Builder) isUnsafeBuiltin(
+	overload *tree.Overload, def *tree.ResolvedFunctionDefinition,
+) bool {
+	if b.skipUnsafeInternalsCheck {
+		return false
+
+	}
+	if overload.Type != tree.BuiltinRoutine {
+		return false
+	}
+	for _, o := range def.Overloads {
+		if o.Schema == catconstants.CRDBInternalSchemaName {
+			return true
+		}
+	}
+	return false
+}
+
 // ScalarBuilder is a specialized variant of Builder that can be used to create
 // a scalar from a TypedExpr. This is used to build scalar expressions for
 // testing. It is also used temporarily to interface with the old planning code.
@@ -969,18 +987,4 @@ func reType(expr tree.TypedExpr, typ *types.T) tree.TypedExpr {
 		))
 	}
 	return retypedExpr
-}
-
-// isUnsafeBuiltin returns true if the given function definition
-// is a CRDB internal builtin function.
-func isUnsafeBuiltin(overload *tree.Overload, def *tree.ResolvedFunctionDefinition) bool {
-	if overload.Type != tree.BuiltinRoutine {
-		return false
-	}
-	for _, o := range def.Overloads {
-		if o.Schema == catconstants.CRDBInternalSchemaName {
-			return true
-		}
-	}
-	return false
 }

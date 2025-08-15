@@ -952,6 +952,11 @@ func (p *planner) HasViewActivityOrViewActivityRedactedRole(
 }
 
 func (p *planner) tableIsUnsafe(ctx context.Context, d catalog.TableDescriptor) bool {
+	// If the skip property is set, internals are considered safe.
+	if p.skipUnsafeInternalsCheck {
+		return false
+	}
+
 	// All system descriptors are considered unsafe.
 	if catalog.IsSystemDescriptor(d) {
 		return true
