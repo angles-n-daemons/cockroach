@@ -17,10 +17,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/security/securitytest"
 	"github.com/cockroachdb/cockroach/pkg/server"
 	"github.com/cockroachdb/cockroach/pkg/sql/isql"
-	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
-	"github.com/cockroachdb/cockroach/pkg/sql/sessiondatapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlerrors"
-	"github.com/cockroachdb/cockroach/pkg/sql/unsafesql"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -35,41 +32,6 @@ func TestMain(m *testing.M) {
 	randutil.SeedForTests()
 	serverutils.InitTestServerFactory(server.TestServerFactory)
 	os.Exit(m.Run())
-}
-
-func TestCheckUnsafeInternalsAccess(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
-
-	t.Run("returns the right response with the right session data", func(t *testing.T) {
-		for _, test := range []struct {
-			Internal             bool
-			AllowUnsafeInternals bool
-			Passes               bool
-		}{
-			{Internal: true, AllowUnsafeInternals: true, Passes: true},
-			{Internal: true, AllowUnsafeInternals: false, Passes: true},
-			{Internal: false, AllowUnsafeInternals: true, Passes: true},
-			{Internal: false, AllowUnsafeInternals: false, Passes: false},
-		} {
-			t.Run(fmt.Sprintf("%t", test), func(t *testing.T) {
-				err := unsafesql.CheckInternalsAccess(&sessiondata.SessionData{
-					SessionData: sessiondatapb.SessionData{
-						Internal: test.Internal,
-					},
-					LocalOnlySessionData: sessiondatapb.LocalOnlySessionData{
-						AllowUnsafeInternals: test.AllowUnsafeInternals,
-					},
-				})
-
-				if test.Passes {
-					require.NoError(t, err)
-				} else {
-					require.ErrorIs(t, err, sqlerrors.ErrUnsafeTableAccess)
-				}
-			})
-		}
-	})
 }
 
 func checkUnsafeErr(t *testing.T, err error) {
@@ -235,4 +197,45 @@ func TestAccessCheckServer(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestAnnotationMismatchPanic(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	ctx := context.Background()
+	s := serverutils.StartServerOnly(t, base.TestServerArgs{
+		DefaultTestTenant: base.TestControlsTenantsExplicitly,
+	})
+	defer s.Stopper().Stop(ctx)
+
+	pool := s.SQLConn(t)
+	defer pool.Close()
+
+	// Create test database
+	_, err := pool.Exec("CREATE DATABASE test")
+	require.NoError(t, err)
+
+	_, err = pool.Exec("USE test")
+	require.NoError(t, err)
+
+	// Create a view that uses crdb_internal functions
+	_, err = pool.Exec(`
+		CREATE VIEW v_col_fn_ids AS 
+		SELECT id, 
+		       json_array_elements((crdb_internal.pb_to_json('cockroach.sql.sqlbase.Descriptor', descriptor, false)->'table'->'columns')->'usesFunctionIds') as uses_fn_ids
+		FROM system.descriptor
+	`)
+	require.NoError(t, err)
+
+	// This will panic with "index out of range [1] with length 1"
+	// due to annotation mismatch between CREATE FUNCTION statement and function body
+	_, err = pool.Exec(`
+		CREATE FUNCTION get_col_fn_ids(table_id INT) RETURNS SETOF v_col_fn_ids
+		LANGUAGE SQL
+		AS $$
+			SELECT * FROM v_col_fn_ids WHERE id = table_id;
+		$$
+	`)
+	require.NoError(t, err)
 }

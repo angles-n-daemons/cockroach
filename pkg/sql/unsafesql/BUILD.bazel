@@ -6,8 +6,12 @@ go_library(
     importpath = "github.com/cockroachdb/cockroach/pkg/sql/unsafesql",
     visibility = ["//visibility:public"],
     deps = [
+        "//pkg/settings",
+        "//pkg/sql/sem/tree",
         "//pkg/sql/sessiondata",
         "//pkg/sql/sqlerrors",
+        "//pkg/util/log",
+        "@com_github_cockroachdb_redact//:redact",
     ],
 )
 
@@ -15,14 +19,11 @@ go_test(
     name = "unsafesql_test",
     srcs = ["unsafesql_test.go"],
     deps = [
-        ":unsafesql",
         "//pkg/base",
         "//pkg/security/securityassets",
         "//pkg/security/securitytest",
         "//pkg/server",
         "//pkg/sql/isql",
-        "//pkg/sql/sessiondata",
-        "//pkg/sql/sessiondatapb",
         "//pkg/sql/sqlerrors",
         "//pkg/testutils/serverutils",
         "//pkg/util/leaktest",
