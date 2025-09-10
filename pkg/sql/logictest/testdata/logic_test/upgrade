@@ -5,7 +5,7 @@
 
 # The initial version should be a final release.
 query T
-SELECT crdb_internal.active_version()->'internal'
+SELECT information_schema.crdb_active_version()->'internal'
 ----
 0
 

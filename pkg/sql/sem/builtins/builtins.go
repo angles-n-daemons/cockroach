@@ -5349,7 +5349,7 @@ value if you rely on the HLC for accuracy.`,
 		},
 	),
 
-	"crdb_internal.active_version": makeBuiltin(
+	"information_schema.crdb_active_version": makeBuiltin(
 		tree.FunctionProperties{Category: builtinconstants.CategorySystemInfo},
 		tree.Overload{
 			Types:      tree.ParamTypes{},

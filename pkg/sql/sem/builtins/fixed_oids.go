@@ -1269,7 +1269,7 @@ var builtinOidsArray = []string{
 	1293: `crdb_internal.cluster_setting_encoded_default(setting: string) -> string`,
 	1294: `crdb_internal.decode_cluster_setting(setting: string, value: string) -> string`,
 	1295: `crdb_internal.node_executable_version() -> string`,
-	1296: `crdb_internal.active_version() -> jsonb`,
+	1296: `information_schema.crdb_active_version() -> jsonb`,
 	1297: `crdb_internal.is_at_least_version(version: string) -> bool`,
 	1298: `crdb_internal.approximate_timestamp(timestamp: decimal) -> timestamp`,
 	1299: `crdb_internal.cluster_id() -> uuid`,
