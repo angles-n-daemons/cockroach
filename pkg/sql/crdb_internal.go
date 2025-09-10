@@ -1384,265 +1384,6 @@ func execStatVar(alloc *tree.DatumAlloc, count int64, n appstatspb.NumericStat) 
 	return alloc.NewDFloat(tree.DFloat(n.GetVariance(count)))
 }
 
-// legacyAnonymizedStmt is a placeholder value for the
-// crdb_internal.node_statement_statistics(anonymized) column. The column used
-// to contain the SQL statement scrubbed of all identifiers. At the time
-// of writing this comment, the column was unused for several releases. Since
-// it's expensive to compute, we no longer populate it. We keep the column in
-// the table to avoid breaking tools that scan crdb_internal tables (even though
-// we don't officially support that, this is an easy step to take).
-var legacyAnonymizedStmt = tree.NewDString("")
-
-var crdbInternalNodeStmtStatsTable = virtualSchemaTable{
-	comment: `statement statistics. ` +
-		`The contents of this table are flushed to the system.statement_statistics table at the interval set by the ` +
-		`cluster setting sql.stats.flush.interval (by default, 10m).`,
-	schema: `
-CREATE TABLE crdb_internal.node_statement_statistics (
-  node_id             INT NOT NULL,
-  application_name    STRING NOT NULL,
-  flags               STRING NOT NULL,
-  statement_id        STRING NOT NULL,
-  key                 STRING NOT NULL,
-  anonymized          STRING,
-  count               INT NOT NULL,
-  first_attempt_count INT NOT NULL,
-  max_retries         INT NOT NULL,
-  last_error          STRING,
-  last_error_code     STRING,
-  rows_avg            FLOAT NOT NULL,
-  rows_var            FLOAT NOT NULL,
-  idle_lat_avg        FLOAT NOT NULL,
-  idle_lat_var        FLOAT NOT NULL,
-  parse_lat_avg       FLOAT NOT NULL,
-  parse_lat_var       FLOAT NOT NULL,
-  plan_lat_avg        FLOAT NOT NULL,
-  plan_lat_var        FLOAT NOT NULL,
-  run_lat_avg         FLOAT NOT NULL,
-  run_lat_var         FLOAT NOT NULL,
-  service_lat_avg     FLOAT NOT NULL,
-  service_lat_var     FLOAT NOT NULL,
-  overhead_lat_avg    FLOAT NOT NULL,
-  overhead_lat_var    FLOAT NOT NULL,
-  bytes_read_avg      FLOAT NOT NULL,
-  bytes_read_var      FLOAT NOT NULL,
-  rows_read_avg       FLOAT NOT NULL,
-  rows_read_var       FLOAT NOT NULL,
-  rows_written_avg    FLOAT NOT NULL,
-  rows_written_var    FLOAT NOT NULL,
-  network_bytes_avg   FLOAT,
-  network_bytes_var   FLOAT,
-  network_msgs_avg    FLOAT,
-  network_msgs_var    FLOAT,
-  max_mem_usage_avg   FLOAT,
-  max_mem_usage_var   FLOAT,
-  max_disk_usage_avg  FLOAT,
-  max_disk_usage_var  FLOAT,
-  contention_time_avg FLOAT,
-  contention_time_var FLOAT,
-  cpu_sql_nanos_avg       FLOAT,
-  cpu_sql_nanos_var       FLOAT,
-  mvcc_step_avg       FLOAT,
-  mvcc_step_var       FLOAT,
-  mvcc_step_internal_avg FLOAT,
-  mvcc_step_internal_var FLOAT,
-  mvcc_seek_avg       FLOAT,
-  mvcc_seek_var       FLOAT,
-  mvcc_seek_internal_avg FLOAT,
-  mvcc_seek_internal_var FLOAT,
-  mvcc_block_bytes_avg       FLOAT,
-  mvcc_block_bytes_var       FLOAT,
-  mvcc_block_bytes_in_cache_avg FLOAT,
-  mvcc_block_bytes_in_cache_var FLOAT,
-  mvcc_key_bytes_avg FLOAT,
-  mvcc_key_bytes_var FLOAT,
-  mvcc_value_bytes_avg       FLOAT,
-  mvcc_value_bytes_var       FLOAT,
-  mvcc_point_count_avg       FLOAT,
-  mvcc_point_count_var       FLOAT,
-  mvcc_points_covered_by_range_tombstones_avg FLOAT,
-  mvcc_points_covered_by_range_tombstones_var FLOAT,
-  mvcc_range_key_count_avg FLOAT,
-  mvcc_range_key_count_var FLOAT,
-  mvcc_range_key_contained_points_avg       FLOAT,
-  mvcc_range_key_contained_points_var       FLOAT,
-  mvcc_range_key_skipped_points_avg      FLOAT,
-  mvcc_range_key_skipped_points_var      FLOAT,
-  implicit_txn        BOOL NOT NULL,
-  full_scan           BOOL NOT NULL,
-  sample_plan         JSONB,
-  database_name       STRING NOT NULL,
-  exec_node_ids       INT[] NOT NULL,
-  kv_node_ids         INT[] NOT NULL,
-  used_follower_read  BOOL NOT NULL,
-  txn_fingerprint_id  STRING,
-  index_recommendations STRING[] NOT NULL,
-  latency_seconds_min FLOAT,
-  latency_seconds_max FLOAT,
-  failure_count INT NOT NULL
-)`,
-	populate: func(ctx context.Context, p *planner, _ catalog.DatabaseDescriptor, addRow func(...tree.Datum) error) error {
-		// If the user is not admin, check the individual VIEWACTIVITY and VIEWACTIVITYREDACTED
-		// privileges.
-		hasPriv, shouldRedactError, err := p.HasViewActivityOrViewActivityRedactedRole(ctx)
-		if err != nil {
-			return err
-		} else if !hasPriv {
-			// If the user is not admin and does not have VIEWACTIVITY or VIEWACTIVITYREDACTED,
-			// return insufficient privileges error.
-			return noViewActivityOrViewActivityRedactedRoleError(p.User())
-		}
-
-		var alloc tree.DatumAlloc
-		localSqlStats := p.extendedEvalCtx.localSQLStats
-		nodeID, _ := p.execCfg.NodeInfo.NodeID.OptionalNodeID() // zero if not available
-
-		statementVisitor := func(_ context.Context, stats *appstatspb.CollectedStatementStatistics) error {
-			errString := tree.DNull
-			if shouldRedactError {
-				errString = alloc.NewDString(tree.DString("<redacted>"))
-			} else {
-				if stats.Stats.SensitiveInfo.LastErr != "" {
-					errString = alloc.NewDString(tree.DString(stats.Stats.SensitiveInfo.LastErr))
-				}
-			}
-
-			errCode := tree.DNull
-			if stats.Stats.LastErrorCode != "" {
-				errCode = alloc.NewDString(tree.DString(stats.Stats.LastErrorCode))
-			}
-
-			var flags string
-			if stats.Key.DistSQL {
-				flags = "+"
-			}
-
-			samplePlan := sqlstatsutil.ExplainTreePlanNodeToJSON(&stats.Stats.SensitiveInfo.MostRecentPlanDescription)
-
-			execNodeIDs := tree.NewDArray(types.Int)
-			for _, nodeID := range stats.Stats.Nodes {
-				if err := execNodeIDs.Append(alloc.NewDInt(tree.DInt(nodeID))); err != nil {
-					return err
-				}
-			}
-
-			kvNodeIDs := tree.NewDArray(types.Int)
-			for _, kvNodeID := range stats.Stats.KVNodeIDs {
-				if err := kvNodeIDs.Append(alloc.NewDInt(tree.DInt(kvNodeID))); err != nil {
-					return err
-				}
-			}
-
-			txnFingerprintID := tree.DNull
-			if stats.Key.TransactionFingerprintID != appstatspb.InvalidTransactionFingerprintID {
-				txnFingerprintID = alloc.NewDString(tree.DString(strconv.FormatUint(uint64(stats.Key.TransactionFingerprintID), 10)))
-
-			}
-
-			indexRecommendations := tree.NewDArray(types.String)
-			for _, recommendation := range stats.Stats.IndexRecommendations {
-				if err := indexRecommendations.Append(alloc.NewDString(tree.DString(recommendation))); err != nil {
-					return err
-				}
-			}
-
-			err := addRow(
-				alloc.NewDInt(tree.DInt(nodeID)),                                         // node_id
-				alloc.NewDString(tree.DString(stats.Key.App)),                            // application_name
-				alloc.NewDString(tree.DString(flags)),                                    // flags
-				alloc.NewDString(tree.DString(strconv.FormatUint(uint64(stats.ID), 10))), // statement_id
-				alloc.NewDString(tree.DString(stats.Key.Query)),                          // key
-				legacyAnonymizedStmt,                                                     // anonymized
-				alloc.NewDInt(tree.DInt(stats.Stats.Count)),                              // count
-				alloc.NewDInt(tree.DInt(stats.Stats.FirstAttemptCount)),                  // first_attempt_count
-				alloc.NewDInt(tree.DInt(stats.Stats.MaxRetries)),                         // max_retries
-				errString, // last_error
-				errCode,   // last_error_code
-				alloc.NewDFloat(tree.DFloat(stats.Stats.NumRows.Mean)),                                                                   // rows_avg
-				alloc.NewDFloat(tree.DFloat(stats.Stats.NumRows.GetVariance(stats.Stats.Count))),                                         // rows_var
-				alloc.NewDFloat(tree.DFloat(stats.Stats.IdleLat.Mean)),                                                                   // idle_lat_avg
-				alloc.NewDFloat(tree.DFloat(stats.Stats.IdleLat.GetVariance(stats.Stats.Count))),                                         // idle_lat_var
-				alloc.NewDFloat(tree.DFloat(stats.Stats.ParseLat.Mean)),                                                                  // parse_lat_avg
-				alloc.NewDFloat(tree.DFloat(stats.Stats.ParseLat.GetVariance(stats.Stats.Count))),                                        // parse_lat_var
-				alloc.NewDFloat(tree.DFloat(stats.Stats.PlanLat.Mean)),                                                                   // plan_lat_avg
-				alloc.NewDFloat(tree.DFloat(stats.Stats.PlanLat.GetVariance(stats.Stats.Count))),                                         // plan_lat_var
-				alloc.NewDFloat(tree.DFloat(stats.Stats.RunLat.Mean)),                                                                    // run_lat_avg
-				alloc.NewDFloat(tree.DFloat(stats.Stats.RunLat.GetVariance(stats.Stats.Count))),                                          // run_lat_var
-				alloc.NewDFloat(tree.DFloat(stats.Stats.ServiceLat.Mean)),                                                                // service_lat_avg
-				alloc.NewDFloat(tree.DFloat(stats.Stats.ServiceLat.GetVariance(stats.Stats.Count))),                                      // service_lat_var
-				alloc.NewDFloat(tree.DFloat(stats.Stats.OverheadLat.Mean)),                                                               // overhead_lat_avg
-				alloc.NewDFloat(tree.DFloat(stats.Stats.OverheadLat.GetVariance(stats.Stats.Count))),                                     // overhead_lat_var
-				alloc.NewDFloat(tree.DFloat(stats.Stats.BytesRead.Mean)),                                                                 // bytes_read_avg
-				alloc.NewDFloat(tree.DFloat(stats.Stats.BytesRead.GetVariance(stats.Stats.Count))),                                       // bytes_read_var
-				alloc.NewDFloat(tree.DFloat(stats.Stats.RowsRead.Mean)),                                                                  // rows_read_avg
-				alloc.NewDFloat(tree.DFloat(stats.Stats.RowsRead.GetVariance(stats.Stats.Count))),                                        // rows_read_var
-				alloc.NewDFloat(tree.DFloat(stats.Stats.RowsWritten.Mean)),                                                               // rows_written_avg
-				alloc.NewDFloat(tree.DFloat(stats.Stats.RowsWritten.GetVariance(stats.Stats.Count))),                                     // rows_written_var
-				execStatAvg(&alloc, stats.Stats.ExecStats.Count, stats.Stats.ExecStats.NetworkBytes),                                     // network_bytes_avg
-				execStatVar(&alloc, stats.Stats.ExecStats.Count, stats.Stats.ExecStats.NetworkBytes),                                     // network_bytes_var
-				execStatAvg(&alloc, stats.Stats.ExecStats.Count, stats.Stats.ExecStats.NetworkMessages),                                  // network_msgs_avg
-				execStatVar(&alloc, stats.Stats.ExecStats.Count, stats.Stats.ExecStats.NetworkMessages),                                  // network_msgs_var
-				execStatAvg(&alloc, stats.Stats.ExecStats.Count, stats.Stats.ExecStats.MaxMemUsage),                                      // max_mem_usage_avg
-				execStatVar(&alloc, stats.Stats.ExecStats.Count, stats.Stats.ExecStats.MaxMemUsage),                                      // max_mem_usage_var
-				execStatAvg(&alloc, stats.Stats.ExecStats.Count, stats.Stats.ExecStats.MaxDiskUsage),                                     // max_disk_usage_avg
-				execStatVar(&alloc, stats.Stats.ExecStats.Count, stats.Stats.ExecStats.MaxDiskUsage),                                     // max_disk_usage_var
-				execStatAvg(&alloc, stats.Stats.ExecStats.Count, stats.Stats.ExecStats.ContentionTime),                                   // contention_time_avg
-				execStatVar(&alloc, stats.Stats.ExecStats.Count, stats.Stats.ExecStats.ContentionTime),                                   // contention_time_var
-				execStatAvg(&alloc, stats.Stats.ExecStats.Count, stats.Stats.ExecStats.CPUSQLNanos),                                      // cpu_sql_nanos_avg
-				execStatVar(&alloc, stats.Stats.ExecStats.Count, stats.Stats.ExecStats.CPUSQLNanos),                                      // cpu_sql_nanos_var
-				execStatAvg(&alloc, stats.Stats.ExecStats.Count, stats.Stats.ExecStats.MVCCIteratorStats.StepCount),                      // mvcc_step_avg
-				execStatVar(&alloc, stats.Stats.ExecStats.Count, stats.Stats.ExecStats.MVCCIteratorStats.StepCount),                      // mvcc_step_var
-				execStatAvg(&alloc, stats.Stats.ExecStats.Count, stats.Stats.ExecStats.MVCCIteratorStats.StepCountInternal),              // mvcc_step_internal_avg
-				execStatVar(&alloc, stats.Stats.ExecStats.Count, stats.Stats.ExecStats.MVCCIteratorStats.StepCountInternal),              // mvcc_step_internal_var
-				execStatAvg(&alloc, stats.Stats.ExecStats.Count, stats.Stats.ExecStats.MVCCIteratorStats.SeekCount),                      // mvcc_seek_avg
-				execStatVar(&alloc, stats.Stats.ExecStats.Count, stats.Stats.ExecStats.MVCCIteratorStats.SeekCount),                      // mvcc_seek_var
-				execStatAvg(&alloc, stats.Stats.ExecStats.Count, stats.Stats.ExecStats.MVCCIteratorStats.SeekCountInternal),              // mvcc_seek_internal_avg
-				execStatVar(&alloc, stats.Stats.ExecStats.Count, stats.Stats.ExecStats.MVCCIteratorStats.SeekCountInternal),              // mvcc_seek_internal_var
-				execStatAvg(&alloc, stats.Stats.ExecStats.Count, stats.Stats.ExecStats.MVCCIteratorStats.BlockBytes),                     // mvcc_block_bytes_avg
-				execStatVar(&alloc, stats.Stats.ExecStats.Count, stats.Stats.ExecStats.MVCCIteratorStats.BlockBytes),                     // mvcc_block_bytes_var
-				execStatAvg(&alloc, stats.Stats.ExecStats.Count, stats.Stats.ExecStats.MVCCIteratorStats.BlockBytesInCache),              // mvcc_block_bytes_in_cache_avg
-				execStatVar(&alloc, stats.Stats.ExecStats.Count, stats.Stats.ExecStats.MVCCIteratorStats.BlockBytesInCache),              // mvcc_block_bytes_in_cache_var
-				execStatAvg(&alloc, stats.Stats.ExecStats.Count, stats.Stats.ExecStats.MVCCIteratorStats.KeyBytes),                       // mvcc_key_bytes_avg
-				execStatVar(&alloc, stats.Stats.ExecStats.Count, stats.Stats.ExecStats.MVCCIteratorStats.KeyBytes),                       // mvcc_key_bytes_var
-				execStatAvg(&alloc, stats.Stats.ExecStats.Count, stats.Stats.ExecStats.MVCCIteratorStats.ValueBytes),                     // mvcc_value_bytes_avg
-				execStatVar(&alloc, stats.Stats.ExecStats.Count, stats.Stats.ExecStats.MVCCIteratorStats.ValueBytes),                     // mvcc_value_bytes_var
-				execStatAvg(&alloc, stats.Stats.ExecStats.Count, stats.Stats.ExecStats.MVCCIteratorStats.PointCount),                     // mvcc_point_count_avg
-				execStatVar(&alloc, stats.Stats.ExecStats.Count, stats.Stats.ExecStats.MVCCIteratorStats.PointCount),                     // mvcc_point_count_var
-				execStatAvg(&alloc, stats.Stats.ExecStats.Count, stats.Stats.ExecStats.MVCCIteratorStats.PointsCoveredByRangeTombstones), // mvcc_points_covered_by_range_tombstones_avg
-				execStatVar(&alloc, stats.Stats.ExecStats.Count, stats.Stats.ExecStats.MVCCIteratorStats.PointsCoveredByRangeTombstones), // mvcc_points_covered_by_range_tombstones_var
-				execStatAvg(&alloc, stats.Stats.ExecStats.Count, stats.Stats.ExecStats.MVCCIteratorStats.RangeKeyCount),                  // mvcc_range_key_count_avg
-				execStatVar(&alloc, stats.Stats.ExecStats.Count, stats.Stats.ExecStats.MVCCIteratorStats.RangeKeyCount),                  // mvcc_range_key_count_var
-				execStatAvg(&alloc, stats.Stats.ExecStats.Count, stats.Stats.ExecStats.MVCCIteratorStats.RangeKeyContainedPoints),        // mvcc_range_key_contained_points_avg
-				execStatVar(&alloc, stats.Stats.ExecStats.Count, stats.Stats.ExecStats.MVCCIteratorStats.RangeKeyContainedPoints),        // mvcc_range_key_contained_points_var
-				execStatAvg(&alloc, stats.Stats.ExecStats.Count, stats.Stats.ExecStats.MVCCIteratorStats.RangeKeySkippedPoints),          // mvcc_range_key_skipped_points_avg
-				execStatVar(&alloc, stats.Stats.ExecStats.Count, stats.Stats.ExecStats.MVCCIteratorStats.RangeKeySkippedPoints),          // mvcc_range_key_skipped_points_var
-				tree.MakeDBool(tree.DBool(stats.Key.ImplicitTxn)),                                                                        // implicit_txn
-				tree.MakeDBool(tree.DBool(stats.Key.FullScan)),                                                                           // full_scan
-				alloc.NewDJSON(tree.DJSON{JSON: samplePlan}),                                                                             // sample_plan
-				alloc.NewDString(tree.DString(stats.Key.Database)),                                                                       // database_name
-				execNodeIDs, // exec_node_ids
-				kvNodeIDs,   // kv_node_ids
-				tree.MakeDBool(tree.DBool(stats.Stats.UsedFollowerRead)), // used_follower_read
-				txnFingerprintID,     // txn_fingerprint_id
-				indexRecommendations, // index_recommendations
-				alloc.NewDFloat(tree.DFloat(stats.Stats.LatencyInfo.Min)), // latency_seconds_min
-				alloc.NewDFloat(tree.DFloat(stats.Stats.LatencyInfo.Max)), // latency_seconds_max
-				alloc.NewDInt(tree.DInt(stats.Stats.FailureCount)),        // failure_count
-			)
-			if err != nil {
-				return err
-			}
-
-			return nil
-		}
-
-		return localSqlStats.IterateStatementStats(ctx, sqlstats.IteratorOptions{
-			SortedAppNames: true,
-			SortedKey:      true,
-		}, statementVisitor)
-	},
-}
-
 // TODO(arul): Explore updating the schema below to have key be an INT and
 // statement_ids be INT[] now that we've moved to having uint64 as the type of
 // StmtFingerprintID and TxnKey. Issue #55284
@@ -6926,6 +6667,26 @@ CREATE TABLE crdb_internal.index_usage_statistics (
 				})
 		}
 		return setupGenerator(ctx, worker, stopper)
+	},
+}
+
+var crdbInternalNodeStmtStatsTable = virtualSchemaView{
+	comment: `statement statistics. ` +
+		`The contents of this table are flushed to the system.statement_statistics table at the interval set by the ` +
+		`cluster setting sql.stats.flush.interval (by default, 10m).`,
+	schema: `
+CREATE VIEW crdb_internal.node_statement_statistics AS SELECT
+		node_id,
+		application_name,
+		flags,
+		statement_id
+	FROM information_schema.crdb_node_statement_statistics
+`,
+	resultColumns: colinfo.ResultColumns{
+		{Name: "node_id", Typ: types.Int},
+		{Name: "application_name", Typ: types.String},
+		{Name: "flags", Typ: types.Int},
+		{Name: "statement_id", Typ: types.String},
 	},
 }
 

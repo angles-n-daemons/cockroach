@@ -315,6 +315,7 @@ const (
 	InformationSchemaViewRoutineUsageTableID
 	InformationSchemaViewTableUsageTableID
 	InformationSchemaViewsTableID
+	InformationSchemaNodeStmtStatsTableID
 	PgCatalogID
 	PgCatalogAggregateTableID
 	PgCatalogAmTableID
