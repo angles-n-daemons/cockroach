@@ -35,6 +35,8 @@ message TimeSeriesData {
   optional string source = 2 [(gogoproto.nullable) = false];
   // Datapoints representing one or more measurements taken from the variable.
   repeated TimeSeriesDatapoint datapoints = 3 [(gogoproto.nullable) = false];
+  // A set of key/value pairs which further identify the time series.
+  map<string, string> labels = 4;
 }
 
 // TimeSeriesQueryAggregator describes a set of aggregation functions which can

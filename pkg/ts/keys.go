@@ -7,6 +7,7 @@ package ts
 
 import (
 	"bytes"
+	"encoding/json"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/keys"
@@ -60,6 +61,23 @@ func MakeDataKey(name string, source string, r Resolution, timestamp int64) roac
 	k = encoding.EncodeVarintAscending(k, timeslot)
 	k = append(k, source...)
 	return k
+}
+
+const suffixDelimiter = "#"
+
+func MakeLabeledDataKey(
+	name string, source string, labels map[string]string, r Resolution, timestamp int64,
+) (roachpb.Key, error) {
+	k := MakeDataKey(name, source, r, timestamp)
+	if labels != nil {
+		// we can do a simple json encoding of the key label pairs so its readible and compact.
+		labelBytes, err := json.Marshal(labels)
+		if err != nil {
+			return nil, err
+		}
+		k = append(k, append([]byte(suffixDelimiter), labelBytes...)...)
+	}
+	return k, nil
 }
 
 // makeDataKeySeriesPrefix creates a key prefix for a time series at a specific

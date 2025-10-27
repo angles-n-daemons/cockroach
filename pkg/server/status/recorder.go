@@ -636,23 +636,23 @@ func (mr *MetricsRecorder) GenerateNodeStatus(ctx context.Context) *statuspb.Nod
 		TotalSystemMemory: systemMemory,
 	}
 
-	eachRecordableValue(mr.mu.nodeRegistry, func(name string, val float64) {
+	eachRecordableValue(mr.mu.nodeRegistry, func(name string, val float64, _ any) {
 		nodeStat.Metrics[name] = val
 	})
-	eachRecordableValue(mr.mu.appRegistry, func(name string, val float64) {
+	eachRecordableValue(mr.mu.appRegistry, func(name string, val float64, _ any) {
 		nodeStat.Metrics[name] = val
 	})
-	eachRecordableValue(mr.mu.logRegistry, func(name string, val float64) {
+	eachRecordableValue(mr.mu.logRegistry, func(name string, val float64, _ any) {
 		nodeStat.Metrics[name] = val
 	})
-	eachRecordableValue(mr.mu.sysRegistry, func(name string, val float64) {
+	eachRecordableValue(mr.mu.sysRegistry, func(name string, val float64, _ any) {
 		nodeStat.Metrics[name] = val
 	})
 
 	// Generate status summaries for stores.
 	for storeID, r := range mr.mu.storeRegistries {
 		storeMetrics := make(map[string]float64, lastStoreMetricCount)
-		eachRecordableValue(r, func(name string, val float64) {
+		eachRecordableValue(r, func(name string, val float64, _ any) {
 			storeMetrics[name] = val
 		})
 
@@ -747,7 +747,7 @@ type registryRecorder struct {
 
 // extractValue extracts the metric value(s) for the given metric and passes it, along with the metric name, to the
 // provided callback function.
-func extractValue(name string, mtr interface{}, fn func(string, float64)) error {
+func extractValue(name string, mtr interface{}, fn func(string, float64, any)) error {
 	switch mtr := mtr.(type) {
 	case metric.WindowedHistogram:
 		// Use cumulative stats here. Count and Sum must be calculated against the cumulative histogram.
@@ -761,18 +761,18 @@ func extractValue(name string, mtr interface{}, fn func(string, float64)) error 
 		windowedSnapshot := mtr.WindowedSnapshot()
 		for _, c := range metric.HistogramMetricComputers {
 			if c.IsSummaryMetric {
-				fn(name+c.Suffix, c.ComputedMetric(windowedSnapshot))
+				fn(name+c.Suffix, c.ComputedMetric(windowedSnapshot), mtr)
 			} else {
-				fn(name+c.Suffix, c.ComputedMetric(cumulativeSnapshot))
+				fn(name+c.Suffix, c.ComputedMetric(cumulativeSnapshot), mtr)
 			}
 		}
 	case metric.PrometheusExportable:
 		// NB: this branch is intentionally at the bottom since all metrics implement it.
 		m := mtr.ToPrometheusMetric()
 		if m.Gauge != nil {
-			fn(name, *m.Gauge.Value)
+			fn(name, *m.Gauge.Value, mtr)
 		} else if m.Counter != nil {
-			fn(name, *m.Counter.Value)
+			fn(name, *m.Counter.Value, mtr)
 		}
 	case metric.PrometheusVector:
 		// NOOP - We don't record metric.PrometheusVector into TSDB. These metrics
@@ -789,7 +789,7 @@ func extractValue(name string, mtr interface{}, fn func(string, float64)) error 
 // function once for each recordable value represented by that metric. This is
 // useful to expand certain metric types (such as histograms) into multiple
 // recordable values.
-func eachRecordableValue(reg *metric.Registry, fn func(string, float64)) {
+func eachRecordableValue(reg *metric.Registry, fn func(string, float64, any)) {
 	reg.Each(func(name string, mtr interface{}) {
 		if err := extractValue(name, mtr, fn); err != nil {
 			log.Dev.Warningf(context.TODO(), "%v", err)
@@ -799,7 +799,20 @@ func eachRecordableValue(reg *metric.Registry, fn func(string, float64)) {
 }
 
 func (rr registryRecorder) record(dest *[]tspb.TimeSeriesData) {
-	eachRecordableValue(rr.registry, func(name string, val float64) {
+	eachRecordableValue(rr.registry, func(name string, val float64, mtr any) {
+		var labels map[string]string = nil
+		if typedMtr, ok := mtr.(metric.PrometheusExportable); ok {
+			promlabels := typedMtr.GetLabels(false)
+			labels = map[string]string{}
+			for _, l := range promlabels {
+				// why are these nilable?
+				if l.Name == nil || l.Value == nil {
+					continue
+				}
+
+				labels[*l.Name] = *l.Value
+			}
+		}
 		*dest = append(*dest, tspb.TimeSeriesData{
 			Name:   fmt.Sprintf(rr.format, name),
 			Source: rr.source,
@@ -809,6 +822,7 @@ func (rr registryRecorder) record(dest *[]tspb.TimeSeriesData) {
 					Value:          val,
 				},
 			},
+			Labels: labels,
 		})
 	})
 }

@@ -233,7 +233,10 @@ func (db *DB) tryStoreData(ctx context.Context, r Resolution, data []tspb.TimeSe
 			if err := value.SetProto(&idata); err != nil {
 				return err
 			}
-			key := MakeDataKey(d.Name, d.Source, r, idata.StartTimestampNanos)
+			key, err := MakeLabeledDataKey(d.Name, d.Source, d.Labels, r, idata.StartTimestampNanos)
+			if err != nil {
+				return err
+			}
 			kvs = append(kvs, roachpb.KeyValue{
 				Key:   key,
 				Value: value,
