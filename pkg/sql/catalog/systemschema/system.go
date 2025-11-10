@@ -1398,6 +1398,22 @@ CREATE TABLE public.inspect_errors (
     INDEX hash_idx (hash ASC),
     FAMILY "primary" (row_id, hash, fingerprint, hint, created_at)
   );`
+
+	StatementFingerprintsTableSchema = `
+	CREATE TABLE system.statement_fingerprints (
+	  row_id         INT8 DEFAULT unique_rowid() NOT NULL,
+	  fingerprint_id BYTES NOT NULL,
+	  fingerprint    STRING NOT NULL,
+	  summary        STRING NOT NULL,
+	  implicit_txn   BOOL NOT NULL,
+	  database       STRING NOT NULL,
+		created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+	  CONSTRAINT "primary" PRIMARY KEY ("row_id" ASC),
+	  UNIQUE INDEX (fingerprint_id, fingerprint, implicit_txn, database),
+	  INVERTED INDEX fingerprint_gin (fingerprint gin_trgm_ops),
+	  FAMILY "primary" (row_id, fingerprint_id, fingerprint, summary, implicit_txn, database, created_at)
+	)
+`
 )
 
 func pk(name string) descpb.IndexDescriptor {
@@ -5471,6 +5487,61 @@ var (
 				KeyColumnNames:      []string{"hash"},
 				KeyColumnDirections: singleASC,
 				KeyColumnIDs:        []descpb.ColumnID{2},
+				KeySuffixColumnIDs:  []descpb.ColumnID{1},
+			},
+		),
+	)
+
+	StatementFingerprintsTable = makeSystemTable(
+		StatementFingerprintsTableSchema,
+		systemTable(
+			catconstants.StatementFingerprintsTableName,
+			descpb.InvalidID, // dynamically assigned
+			[]descpb.ColumnDescriptor{
+				{Name: "row_id", ID: 1, Type: types.Int, DefaultExpr: &uniqueRowIDString},
+				{Name: "fingerprint_id", ID: 2, Type: types.Bytes},
+				{Name: "fingerprint", ID: 3, Type: types.String},
+				{Name: "summary", ID: 4, Type: types.String},
+				{Name: "implicit_txn", ID: 5, Type: types.Bool},
+				{Name: "database", ID: 6, Type: types.String},
+				{Name: "created_at", ID: 7, Type: types.TimestampTZ, DefaultExpr: &nowTZString},
+			},
+			[]descpb.ColumnFamilyDescriptor{
+				{
+					Name:        "primary",
+					ID:          0,
+					ColumnNames: []string{"row_id", "fingerprint_id", "fingerprint", "summary", "implicit_txn", "database", "created_at"},
+					ColumnIDs:   []descpb.ColumnID{1, 2, 3, 4, 5, 6, 7},
+				},
+			},
+			descpb.IndexDescriptor{
+				Name:                "primary",
+				ID:                  1,
+				Unique:              true,
+				KeyColumnNames:      []string{"row_id"},
+				KeyColumnDirections: singleASC,
+				KeyColumnIDs:        []descpb.ColumnID{1},
+			},
+			descpb.IndexDescriptor{
+				Name:                "statement_fingerprints_fingerprint_id_fingerprint_implicit_txn_key",
+				ID:                  2,
+				Unique:              true,
+				KeyColumnNames:      []string{"fingerprint_id", "fingerprint", "implicit_txn", "database"},
+				KeyColumnDirections: []catenumpb.IndexColumn_Direction{catenumpb.IndexColumn_ASC, catenumpb.IndexColumn_ASC, catenumpb.IndexColumn_ASC, catenumpb.IndexColumn_ASC},
+				KeyColumnIDs:        []descpb.ColumnID{2, 3, 5, 6},
+				KeySuffixColumnIDs:  []descpb.ColumnID{1},
+				Version:             descpb.StrictIndexColumnIDGuaranteesVersion,
+			},
+			descpb.IndexDescriptor{
+				Name:                "fingerprint_gin",
+				Type:                idxtype.INVERTED,
+				ID:                  3,
+				Unique:              false,
+				Version:             descpb.StrictIndexColumnIDGuaranteesVersion,
+				KeyColumnNames:      []string{"fingerprint"},
+				KeyColumnDirections: []catenumpb.IndexColumn_Direction{catenumpb.IndexColumn_ASC},
+				InvertedColumnKinds: []catpb.InvertedIndexColumnKind{catpb.InvertedIndexColumnKind_TRIGRAM},
+				KeyColumnIDs:        []descpb.ColumnID{3},
 				KeySuffixColumnIDs:  []descpb.ColumnID{1},
 			},
 		),
