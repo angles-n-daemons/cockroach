@@ -463,14 +463,6 @@ func NewServer(cfg *ExecutorConfig, pool *mon.BytesMonitor) *Server {
 		reportedSQLStats,
 		cfg.SQLStatsTestingKnobs,
 	)
-	sqlStatsIngester := sslocal.NewSQLStatsIngester(
-		cfg.Settings, cfg.SQLStatsTestingKnobs, serverMetrics.IngesterMetrics, insightsProvider, localSQLStats)
-	// TODO(117690): Unify StmtStatsEnable and TxnStatsEnable into a single cluster setting.
-	sqlstats.TxnStatsEnable.SetOnChange(&cfg.Settings.SV, func(_ context.Context) {
-		if !sqlstats.TxnStatsEnable.Get(&cfg.Settings.SV) {
-			sqlStatsIngester.Clear()
-		}
-	})
 	s := &Server{
 		cfg:               cfg,
 		Metrics:           metrics,
@@ -479,7 +471,6 @@ func NewServer(cfg *ExecutorConfig, pool *mon.BytesMonitor) *Server {
 		pool:              pool,
 		localSqlStats:     localSQLStats,
 		reportedStats:     reportedSQLStats,
-		sqlStatsIngester:  sqlStatsIngester,
 		insights:          insightsProvider,
 		reCache:           tree.NewRegexpCache(512),
 		toCharFormatCache: tochar.NewFormatCache(512),
@@ -517,6 +508,18 @@ func NewServer(cfg *ExecutorConfig, pool *mon.BytesMonitor) *Server {
 	}, localSQLStats)
 
 	s.persistedSQLStats = persistedSQLStats
+
+	sqlStatsIngester := sslocal.NewSQLStatsIngester(
+		cfg.Settings, cfg.SQLStatsTestingKnobs, serverMetrics.IngesterMetrics, persistedSQLStats, insightsProvider, localSQLStats)
+	// TODO(117690): Unify StmtStatsEnable and TxnStatsEnable into a single cluster setting.
+	sqlstats.TxnStatsEnable.SetOnChange(&cfg.Settings.SV, func(_ context.Context) {
+		if !sqlstats.TxnStatsEnable.Get(&cfg.Settings.SV) {
+			sqlStatsIngester.Clear()
+		}
+	})
+
+	s.sqlStatsIngester = sqlStatsIngester
+
 	schemaTelemetryIEMonitor := MakeInternalExecutorMemMonitor(MemoryMetrics{}, s.GetExecutorConfig().Settings)
 	schemaTelemetryIEMonitor.StartNoReserved(context.Background(), s.GetBytesMonitor())
 	s.schemaTelemetryController = schematelemetrycontroller.NewController(
