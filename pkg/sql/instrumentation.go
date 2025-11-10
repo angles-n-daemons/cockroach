@@ -436,8 +436,7 @@ func (ih *instrumentationHelper) Setup(
 	ih.isTenant = execinfra.IncludeRUEstimateInExplainAnalyze.Get(cfg.SV()) && cfg.DistSQLSrv != nil &&
 		cfg.DistSQLSrv.TenantCostController != nil
 	ih.topLevelStats = topLevelQueryStats{}
-	stmtFingerprintId := appstatspb.ConstructStatementFingerprintID(
-		stmt.StmtNoConstants, implicitTxn, p.SessionData().Database)
+	stmtFingerprintId := p.extendedEvalCtx.SQLStatsController.CreateStatementFingerprint(ctx, p.SessionData().Database, stmt.StmtNoConstants, implicitTxn)
 	ih.fingerprintId = stmtFingerprintId
 	ih.stmtDiagnosticsRecorder = stmtDiagnosticsRecorder
 	ih.withStatementTrace = cfg.TestingKnobs.WithStatementTrace
