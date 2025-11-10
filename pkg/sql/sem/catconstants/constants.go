@@ -111,6 +111,7 @@ const (
 	PreparedTransactionsTableName           SystemTableName = "prepared_transactions"
 	InspectErrorsTableName                  SystemTableName = "inspect_errors"
 	StatementHintsTableName                 SystemTableName = "statement_hints"
+	StatementFingerprintsTableName          SystemTableName = "statement_fingerprints"
 )
 
 // Oid for virtual database and table.

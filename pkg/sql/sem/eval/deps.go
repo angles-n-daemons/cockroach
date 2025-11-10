@@ -754,7 +754,7 @@ type SQLStatsController interface {
 		ctx context.Context, fingerprint string, dbName string, implicitTxn bool,
 	) appstatspb.StmtFingerprintID
 	CreateTransactionFingerprint(
-		ctx context.Context, fingerprint string, dbName string, implicitTxn bool,
+		ctx context.Context, txnFpBuilder appstatspb.TransactionFingerprintBuilder,
 	) appstatspb.TransactionFingerprintID
 }
 

@@ -1,12 +1,8 @@
-load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
+load("@io_bazel_rules_go//go:def.bzl", "go_library")
 
 go_library(
     name = "fingerprint",
-    srcs = [
-        "fingerprint.go",
-    ],
-    importpath = "github.com/cockroachdb/cockroach/pkg/obs/fingerprint",
+    srcs = ["fingerprint.go"],
+    importpath = "github.com/cockroachdb/cockroach/pkg/sql/sqlstats/fingerprint",
     visibility = ["//visibility:public"],
-    deps = [
-    ],
 )
