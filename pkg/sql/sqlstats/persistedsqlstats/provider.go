@@ -19,6 +19,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/jobs"
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
+	"github.com/cockroachdb/cockroach/pkg/sql/appstatspb"
 	"github.com/cockroachdb/cockroach/pkg/sql/isql"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlstats"
@@ -299,4 +300,17 @@ func (s *PersistedSQLStats) resetSysTableStats(ctx context.Context, tableName st
 		sessiondata.NodeUserSessionDataOverride,
 		"TRUNCATE "+tableName)
 	return err
+}
+
+func (s *PersistedSQLStats) CreateStatementFingerprint(
+	ctx context.Context, fingerprint string, dbName string, implicitTxn bool,
+) appstatspb.StmtFingerprintID {
+	return appstatspb.ConstructStatementFingerprintID(fingerprint, implicitTxn, dbName)
+}
+
+func (s *PersistedSQLStats) CreateTransactionFingerprint(
+	ctx context.Context, txnFpBuilder appstatspb.TransactionFingerprintBuilder,
+) appstatspb.TransactionFingerprintID {
+	fp, _ := txnFpBuilder.Build()
+	return fp
 }
