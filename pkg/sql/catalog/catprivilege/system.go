@@ -88,6 +88,7 @@ var (
 
 	readWriteSystemSequences = []catconstants.SystemTableName{
 		catconstants.RoleIDSequenceName,
+		catconstants.StatementFingerprintIDSequenceName,
 	}
 
 	systemSuperuserPrivileges = func() map[descpb.NameInfo]privilege.List {

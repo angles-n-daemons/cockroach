@@ -2405,10 +2405,7 @@ GO_TARGETS = [
     "//pkg/sql/sqlliveness:sqlliveness",
     "//pkg/sql/sqlnoccltest:sqlnoccltest_test",
     "//pkg/sql/sqlstats/fingerprint:fingerprint",
-<<<<<<< HEAD
     "//pkg/sql/sqlstats/fingerprint:fingerprint_test",
-=======
->>>>>>> cf2360d74ebc00d80d6b59dae5066f764bbf9193
     "//pkg/sql/sqlstats/insights/integration:integration_test",
     "//pkg/sql/sqlstats/insights:insights",
     "//pkg/sql/sqlstats/insights:insights_test",
