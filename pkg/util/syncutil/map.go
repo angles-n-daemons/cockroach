@@ -394,48 +394,6 @@ func (m *Map[K, V]) Range(f func(key K, value *V) bool) {
 	}
 }
 
-// Len returns the number of entries in the map.
-// Note that this is inherently racy: the actual map size could have changed
-// by the time this method returns. It should be treated as an approximation.
-func (m *Map[K, V]) Len() int {
-	read := m.loadReadOnly()
-	count := 0
-
-	// If there's no dirty map or no amendments, we can just count the read map
-	if !read.amended {
-		for _, e := range read.m {
-			if _, ok := e.load(); ok {
-				count++
-			}
-		}
-		return count
-	}
-
-	// Need to lock and count both maps
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	// Re-read after acquiring lock
-	read = m.loadReadOnly()
-	if !read.amended {
-		// Map was promoted while we waited for the lock
-		for _, e := range read.m {
-			if _, ok := e.load(); ok {
-				count++
-			}
-		}
-		return count
-	}
-
-	// Count entries in dirty map (which contains all valid entries)
-	for _, e := range m.dirty {
-		if _, ok := e.load(); ok {
-			count++
-		}
-	}
-	return count
-}
-
 func (m *Map[K, V]) missLocked() {
 	m.misses++
 	if m.misses < len(m.dirty) {

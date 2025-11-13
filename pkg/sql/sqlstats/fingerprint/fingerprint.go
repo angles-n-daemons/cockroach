@@ -8,10 +8,13 @@ package fingerprint
 import (
 	"context"
 	"encoding/binary"
+	"strings"
+	"sync"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/appstatspb"
 	"github.com/cockroachdb/cockroach/pkg/sql/isql"
-	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
+	"github.com/cockroachdb/cockroach/pkg/util/log"
+	"github.com/cockroachdb/cockroach/pkg/util/log/logpb"
 )
 
 // Maximum possible number of cached fingerprints is 1 million.
@@ -33,8 +36,11 @@ func NewStore(db isql.DB) *Store {
 }
 
 type Store struct {
-	seen syncutil.Map[appstatspb.StmtFingerprintID, struct{}]
-	db   isql.DB
+	mu struct {
+		sync.Mutex
+		seen map[appstatspb.StmtFingerprintID]struct{}
+	}
+	db isql.DB
 }
 
 // Get both returns the fingerprint of the incoming fields, and persists
@@ -42,13 +48,24 @@ type Store struct {
 func (s *Store) Get(
 	ctx context.Context, dbName string, query string, implicitTxn bool,
 ) (appstatspb.StmtFingerprintID, error) {
+	log.Dev.Shoutf(ctx, logpb.Severity_INFO, "Starting fingerprint logic for query: %s", query)
 	fp := appstatspb.ConstructStatementFingerprintID(query, implicitTxn, dbName)
-	cacheFull := s.seen.Len() > MAX_CACHED_FINGERPRINTS
-	if _, ok := s.seen.Load(fp); cacheFull || ok {
+	cacheFull := s.len() > MAX_CACHED_FINGERPRINTS
+
+	if ok := s.load(fp); cacheFull || ok {
 		return fp, nil
 	}
 
-	s.seen.Store(fp, &struct{}{})
+	s.put(fp)
+
+	containsUnsalableTables := strings.Contains(strings.ToLower(query), "system.statement_fingerprints") ||
+		strings.Contains(strings.ToLower(query), "system.table_statistics")
+	if containsUnsalableTables {
+		return fp, nil
+	}
+
+	log.Dev.Shoutf(ctx, logpb.Severity_INFO, "Done caching logic for query: %s", query)
+
 	b := make([]byte, 8)
 	binary.BigEndian.PutUint64(b, uint64(fp))
 	err := s.db.Txn(ctx, func(ctx context.Context, txn isql.Txn) error {
@@ -60,5 +77,29 @@ func (s *Store) Get(
 			`, b, dbName, query, implicitTxn)
 		return err
 	})
+	log.Dev.Shoutf(ctx, logpb.Severity_INFO, "insert logic for query: %s", query)
 	return fp, err
+}
+
+// put puts the key value pair into the cache.
+func (s *Store) put(k appstatspb.StmtFingerprintID) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.mu.seen == nil {
+		s.mu.seen = make(map[appstatspb.StmtFingerprintID]struct{})
+	}
+	s.mu.seen[k] = struct{}{}
+}
+
+func (s *Store) load(k appstatspb.StmtFingerprintID) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, ok := s.mu.seen[k]
+	return ok
+}
+
+func (s *Store) len() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.mu.seen)
 }

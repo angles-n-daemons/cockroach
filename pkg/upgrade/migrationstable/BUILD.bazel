@@ -11,6 +11,8 @@ go_library(
         "//pkg/sql/isql",
         "//pkg/sql/sem/tree",
         "//pkg/sql/sessiondata",
+        "//pkg/util/log",
+        "//pkg/util/log/logpb",
         "//pkg/util/timeutil",
         "@com_github_cockroachdb_errors//:errors",
     ],
