@@ -10,7 +10,6 @@ go_library(
         "//pkg/sql/isql",
         "//pkg/sql/sem/tree",
         "//pkg/util/log",
-        "//pkg/util/log/logpb",
     ],
 )
 
