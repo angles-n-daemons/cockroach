@@ -752,7 +752,7 @@ type SQLStatsController interface {
 	CreateSQLStatsCompactionSchedule(ctx context.Context) error
 	CreateStatementFingerprint(
 		ctx context.Context, dbName string, query string, implicitTxn bool,
-	) appstatspb.StmtFingerprintID
+	) (appstatspb.StmtFingerprintID, int64)
 }
 
 // SchemaTelemetryController is an interface embedded in EvalCtx which can be

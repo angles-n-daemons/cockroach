@@ -26,7 +26,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlstats/fingerprint"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlstats/sslocal"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/log/logpb"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
@@ -310,11 +309,10 @@ func (s *PersistedSQLStats) resetSysTableStats(ctx context.Context, tableName st
 
 func (s *PersistedSQLStats) CreateStatementFingerprint(
 	ctx context.Context, dbName string, query string, implicitTxn bool,
-) appstatspb.StmtFingerprintID {
-	id, err := s.fingerprinter.Get(ctx, dbName, query, implicitTxn)
+) (appstatspb.StmtFingerprintID, int64) {
+	hash, id, err := s.fingerprinter.Get(ctx, dbName, query, implicitTxn)
 	if err != nil {
-		log.Dev.Shoutf(ctx, logpb.Severity_ERROR, "%s", err.Error())
 		log.Dev.Errorf(ctx, "%s", err.Error())
 	}
-	return id
+	return hash, id
 }

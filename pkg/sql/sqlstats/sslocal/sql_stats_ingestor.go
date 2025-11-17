@@ -417,7 +417,7 @@ func (i *SQLStatsIngester) flushBuffer(
 			}
 			// We need to recompute the fingerprint ID.
 			s.ImplicitTxn = transaction.ImplicitTxn
-			s.FingerprintID = i.sqlStatsController.CreateStatementFingerprint(ctx,
+			s.FingerprintID, _ = i.sqlStatsController.CreateStatementFingerprint(ctx,
 				s.Query, s.Database, s.ImplicitTxn)
 		}
 	}

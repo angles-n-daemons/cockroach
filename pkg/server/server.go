@@ -119,7 +119,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/log/eventlog"
 	"github.com/cockroachdb/cockroach/pkg/util/log/logmetrics"
-	"github.com/cockroachdb/cockroach/pkg/util/log/logpb"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/cockroachdb/cockroach/pkg/util/netutil"
@@ -2126,7 +2125,6 @@ func (s *topLevelServer) PreStart(ctx context.Context) error {
 	// executes a SQL query, this must be done after the SQL layer is ready.
 	s.node.recordJoinEvent(ctx)
 
-	log.Dev.Shout(ctx, logpb.Severity_ERROR, "doing sql server prestart")
 	if !s.cfg.DisableSQLServer {
 		// Start the SQL subsystem.
 		if err := s.sqlServer.preStart(
@@ -2138,7 +2136,6 @@ func (s *topLevelServer) PreStart(ctx context.Context) error {
 			return err
 		}
 	}
-	log.Dev.Shout(ctx, logpb.Severity_ERROR, "doing sql server prestart")
 	var apiInternalServer http.Handler
 	if rpcbase.TODODRPC && rpcbase.DRPCEnabled(ctx, s.cfg.Settings) {
 		// Pass our own node ID to connect to local RPC servers

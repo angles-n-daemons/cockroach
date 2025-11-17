@@ -468,8 +468,8 @@ func (s SqlStatsController) CreateSQLStatsCompactionSchedule(_ context.Context) 
 
 func (s SqlStatsController) CreateStatementFingerprint(
 	_ context.Context, fingerprint string, dbName string, implicitTxn bool,
-) appstatspb.StmtFingerprintID {
-	return appstatspb.ConstructStatementFingerprintID(fingerprint, implicitTxn, dbName)
+) (appstatspb.StmtFingerprintID, int64) {
+	return appstatspb.ConstructStatementFingerprintID(fingerprint, implicitTxn, dbName), 0
 }
 
 func (s SqlStatsController) CreateTransactionFingerprint(

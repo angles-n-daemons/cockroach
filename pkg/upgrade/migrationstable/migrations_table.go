@@ -14,8 +14,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/isql"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
-	"github.com/cockroachdb/cockroach/pkg/util/log"
-	"github.com/cockroachdb/cockroach/pkg/util/log/logpb"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
 )
@@ -112,7 +110,6 @@ SELECT count(*)
 		query = fmt.Sprintf(queryFormat, "")
 	}
 
-	log.Dev.Shout(ctx, logpb.Severity_ERROR, "checking if migration check hangs")
 	row, err := ex.QueryRow(
 		ctx,
 		"migration-job-find-already-completed",
@@ -122,7 +119,6 @@ SELECT count(*)
 		v.Minor,
 		v.Patch,
 		v.Internal)
-	log.Dev.Shout(ctx, logpb.Severity_ERROR, "done migration check")
 	if err != nil {
 		return false, err
 	}
