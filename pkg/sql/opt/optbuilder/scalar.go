@@ -890,15 +890,16 @@ func (b *Builder) constructUnary(
 	panic(errors.AssertionFailedf("unhandled unary operator: %s", redact.Safe(un)))
 }
 
-// SupportedCRDBInternalBuiltins are the builtin internals that are "supported"
-// for real customer use in production for legacy reasons.
+// SupportedCRDBInternalBuiltins are the builtin internals that are allowed
+// without requiring the allow_unsafe_internals session variable. This includes
+// legacy customer-facing builtins and internal builtins used by sqlproxy.
+// These should not be discoverable via information_schema.
 var SupportedCRDBInternalBuiltins = map[string]struct{}{
-	// LOCKED: Do not add to this list.
-	// Supported builtins should now be added to information_schema.
-	// More information can be found at the below document:
-	// https://docs.google.com/document/d/1STbb8bljTzK_jXRIJrxtijWsPhGErdH1vZdunzPwXvs/edit?tab=t.0
+	// Legacy customer-facing builtins.
 	`crdb_internal.datums_to_bytes`:           {},
 	`crdb_internal.increment_feature_counter`: {},
+	// Used by sqlproxy for connection migration.
+	`crdb_internal.deserialize_session`: {},
 }
 
 // isUnsafeBuiltin returns true if the given function definition

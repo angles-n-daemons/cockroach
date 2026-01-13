@@ -13,16 +13,17 @@ import (
 
 // TestSupportedCRDBInternalBuiltinsNotChanged verifies that the
 // SupportedCRDBInternalBuiltins map has not changed from its expected values.
-// This test ensures no builtins are inadvertently added to this locked list.
+// This test ensures no builtins are inadvertently added to this list.
 func TestSupportedCRDBInternalBuiltinsNotChanged(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
-	// Hardcoded expected values for SupportedCRDBInternalBuiltins
-	// IMPORTANT: This list is LOCKED and should NOT be modified.
-	// New builtins should be added to information_schema instead.
+	// Hardcoded expected values for SupportedCRDBInternalBuiltins.
+	// This list includes legacy customer-facing builtins and internal builtins
+	// used by sqlproxy. These should not be discoverable via information_schema.
 	expectedBuiltins := map[string]struct{}{
 		`crdb_internal.datums_to_bytes`:           {},
 		`crdb_internal.increment_feature_counter`: {},
+		`crdb_internal.deserialize_session`:       {},
 	}
 
 	// Check that the actual map matches the expected map
