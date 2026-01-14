@@ -53,6 +53,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlstats/persistedsqlstats/sqlstatsutil"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
+	"github.com/cockroachdb/cockroach/pkg/sql/perftrace"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/buildutil"
 	"github.com/cockroachdb/cockroach/pkg/util/cancelchecker"
@@ -605,6 +606,43 @@ func (ex *connExecutor) execStmtInOpenState(
 			)
 		}
 	}()
+
+	// Capture gateway work span for observability.
+	if collector := ex.server.cfg.DistSQLSrv.ServerConfig.WorkSpanCollector; collector != nil {
+		if perftrace.Enabled.Get(&ex.server.cfg.Settings.SV) {
+			// Convert sqlcommenter query tags to perftrace query tags and add to context.
+			if len(stmt.QueryTags) > 0 {
+				perfTags := make([]perftrace.QueryTag, len(stmt.QueryTags))
+				for i, tag := range stmt.QueryTags {
+					perfTags[i] = perftrace.QueryTag{Key: tag.Key, Value: string(tag.Value)}
+				}
+				ctx = perftrace.WithQueryTags(ctx, perfTags)
+			}
+
+			gatewaySpanHandle := collector.StartSpan(
+				ctx,
+				"gateway",
+				uint64(ih.fingerprintId),
+				0, // No parent for gateway span
+			)
+			gatewaySpanHandle.Start()
+			ctx = perftrace.WithParentSpanID(ctx, gatewaySpanHandle.ID())
+			ctx = perftrace.WithFingerprintID(ctx, uint64(ih.fingerprintId))
+			// Make collector available to KV layer for batch span capture.
+			ctx = perftrace.WithCollector(ctx, collector)
+			// Store span handle in context for lower layers to add metrics/attributes.
+			ctx = perftrace.WithCurrentSpanHandle(ctx, gatewaySpanHandle)
+
+			// Set app_name attribute on gateway span.
+			gatewaySpanHandle.SetComponentAttribute("app_name", ex.sessionData().ApplicationName)
+
+			defer func() {
+				// Capture num_rows from the result.
+				gatewaySpanHandle.IncrementComponentMetric("num_rows", int64(res.RowsAffected()))
+				gatewaySpanHandle.Finish()
+			}()
+		}
+	}
 
 	if ex.executorType != executorTypeInternal && ex.sessionData().TransactionTimeout > 0 && !ex.implicitTxn() {
 		timerDuration :=

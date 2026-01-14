@@ -49,6 +49,8 @@ message RaftHeartbeat {
 }
 
 // The traced entry from the leader along with the trace and span ID.
+// Also includes perftrace fields for statement fingerprint and parent span ID
+// propagation to followers.
 message TracedEntry {
   uint64 index = 1 [(gogoproto.nullable) = false,
       (gogoproto.customtype) = "github.com/cockroachdb/cockroach/pkg/kv/kvpb.RaftIndex"];
@@ -56,6 +58,9 @@ message TracedEntry {
       (gogoproto.customtype) = "github.com/cockroachdb/cockroach/pkg/util/tracing/tracingpb.TraceID"];
   uint64 span_id = 3 [(gogoproto.nullable) = false, (gogoproto.customname) = "SpanID",
       (gogoproto.customtype) = "github.com/cockroachdb/cockroach/pkg/util/tracing/tracingpb.SpanID"];
+  // Perftrace fields - populated when perftrace is enabled, even without verbose tracing.
+  uint64 statement_fingerprint_id = 4 [(gogoproto.customname) = "StatementFingerprintID"];
+  int64 perftrace_parent_span_id = 5 [(gogoproto.customname) = "PerftraceParentSpanID"];
 }
 
 // RaftMessageRequest is the request used to send raft messages using our

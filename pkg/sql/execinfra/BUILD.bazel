@@ -51,6 +51,7 @@ go_library(
         "//pkg/sql/catalog/typedesc",
         "//pkg/sql/execinfra/execexpr",
         "//pkg/sql/execinfrapb",
+        "//pkg/sql/perftrace",
         "//pkg/sql/rowenc",
         "//pkg/sql/rowenc/valueside",
         "//pkg/sql/rowinfra",

@@ -74,6 +74,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/server/status"
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
+	"github.com/cockroachdb/cockroach/pkg/sql/perftrace"
 	"github.com/cockroachdb/cockroach/pkg/spanconfig"
 	"github.com/cockroachdb/cockroach/pkg/spanconfig/spanconfigstore"
 	"github.com/cockroachdb/cockroach/pkg/storage"
@@ -1341,6 +1342,10 @@ type StoreConfig struct {
 	// RangeCount is populated by the node and represents the total number of
 	// ranges this node has.
 	RangeCount *atomic.Int64
+
+	// WorkSpanCollector is used for perftrace span capture. When set,
+	// raft follower work can be captured and linked to the originating query.
+	WorkSpanCollector *perftrace.Collector
 }
 
 // logRangeAndNodeEventsEnabled is used to enable or disable logging range events

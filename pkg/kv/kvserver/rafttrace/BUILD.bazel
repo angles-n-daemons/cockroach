@@ -12,6 +12,7 @@ go_library(
         "//pkg/raft/raftpb",
         "//pkg/settings",
         "//pkg/settings/cluster",
+        "//pkg/sql/perftrace",
         "//pkg/util/log",
         "//pkg/util/syncutil",
         "//pkg/util/tracing",

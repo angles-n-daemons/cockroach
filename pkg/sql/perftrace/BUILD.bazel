@@ -1,0 +1,45 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "perftrace",
+    srcs = [
+        "cluster_settings.go",
+        "collector.go",
+        "flush.go",
+        "reservoir.go",
+        "work_span.go",
+    ],
+    importpath = "github.com/cockroachdb/cockroach/pkg/sql/perftrace",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//pkg/base",
+        "//pkg/settings",
+        "//pkg/settings/cluster",
+        "//pkg/sql/isql",
+        "//pkg/sql/sessiondata",
+        "//pkg/util/admission/admissionpb",
+        "//pkg/util/hlc",
+        "//pkg/util/log",
+        "//pkg/util/randutil",
+        "//pkg/util/stop",
+        "//pkg/util/syncutil",
+        "//pkg/util/timeutil",
+    ],
+)
+
+go_test(
+    name = "perftrace_test",
+    srcs = [
+        "query_tag_propagation_test.go",
+        "rate_sampler_test.go",
+        "reservoir_bench_test.go",
+    ],
+    embed = [":perftrace"],
+    deps = [
+        "//pkg/base",
+        "//pkg/settings/cluster",
+        "//pkg/sql/execinfrapb",
+        "//pkg/util/hlc",
+        "@com_github_stretchr_testify//require",
+    ],
+)

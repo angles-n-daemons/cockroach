@@ -1435,6 +1435,27 @@ CREATE TABLE public.inspect_errors (
     CONSTRAINT "primary" PRIMARY KEY (table_id ASC, kind ASC),
     FAMILY "primary" (table_id, kind, job_ids)
   );`
+
+	// WorkSpanTableSchema defines the schema for system.work_span which captures
+	// sampled spans representing work done during query execution for observability.
+	WorkSpanTableSchema = `
+  CREATE TABLE system.work_span (
+    id                        INT8        NOT NULL DEFAULT unique_rowid(),
+    parent_id                 INT8,
+    node_id                   INT4        NOT NULL,
+    statement_fingerprint_id  INT8,
+    ts                        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    duration                  INT8        NOT NULL,
+    cpu_time                  INT8,
+    component                 STRING      NOT NULL,
+    component_metrics         JSONB,
+    component_attributes      JSONB,
+    query_tags                JSONB,
+    CONSTRAINT "primary" PRIMARY KEY (node_id ASC, ts ASC, id ASC),
+    INDEX idx_statement_fingerprint (statement_fingerprint_id ASC, ts DESC),
+    INDEX idx_ts (ts DESC),
+    FAMILY "primary" (id, parent_id, node_id, statement_fingerprint_id, ts, duration, cpu_time, component, component_metrics, component_attributes, query_tags)
+  );`
 )
 
 func pk(name string) descpb.IndexDescriptor {
@@ -1680,6 +1701,7 @@ func MakeSystemTables() []SystemTable {
 		TransactionDiagnosticsTable,
 		StatementHintsTable,
 		TableStatisticsLocksTable,
+		WorkSpanTable,
 	}
 }
 
@@ -5540,6 +5562,65 @@ var (
 				KeyColumnNames:      []string{"table_id", "kind"},
 				KeyColumnDirections: []catenumpb.IndexColumn_Direction{catenumpb.IndexColumn_ASC, catenumpb.IndexColumn_ASC},
 				KeyColumnIDs:        []descpb.ColumnID{1, 2},
+			},
+		),
+	)
+
+	// WorkSpanTable is the descriptor for system.work_span.
+	WorkSpanTable = makeSystemTable(
+		WorkSpanTableSchema,
+		systemTable(
+			catconstants.WorkSpanTableName,
+			descpb.InvalidID, // dynamically assigned
+			[]descpb.ColumnDescriptor{
+				{Name: "id", ID: 1, Type: types.Int, DefaultExpr: &uniqueRowIDString},
+				{Name: "parent_id", ID: 2, Type: types.Int, Nullable: true},
+				{Name: "node_id", ID: 3, Type: types.Int4},
+				{Name: "statement_fingerprint_id", ID: 4, Type: types.Int, Nullable: true},
+				{Name: "ts", ID: 5, Type: types.TimestampTZ, DefaultExpr: &nowTZString},
+				{Name: "duration", ID: 6, Type: types.Int},
+				{Name: "cpu_time", ID: 7, Type: types.Int, Nullable: true},
+				{Name: "component", ID: 8, Type: types.String},
+				{Name: "component_metrics", ID: 9, Type: types.Jsonb, Nullable: true},
+				{Name: "component_attributes", ID: 10, Type: types.Jsonb, Nullable: true},
+				{Name: "query_tags", ID: 11, Type: types.Jsonb, Nullable: true},
+			},
+			[]descpb.ColumnFamilyDescriptor{
+				{
+					Name:            "primary",
+					ID:              0,
+					ColumnNames:     []string{"id", "parent_id", "node_id", "statement_fingerprint_id", "ts", "duration", "cpu_time", "component", "component_metrics", "component_attributes", "query_tags"},
+					ColumnIDs:       []descpb.ColumnID{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11},
+					DefaultColumnID: 11,
+				},
+			},
+			descpb.IndexDescriptor{
+				Name:                "primary",
+				ID:                  1,
+				Unique:              true,
+				KeyColumnNames:      []string{"node_id", "ts", "id"},
+				KeyColumnDirections: []catenumpb.IndexColumn_Direction{catenumpb.IndexColumn_ASC, catenumpb.IndexColumn_ASC, catenumpb.IndexColumn_ASC},
+				KeyColumnIDs:        []descpb.ColumnID{3, 5, 1},
+			},
+			descpb.IndexDescriptor{
+				Name:                "idx_statement_fingerprint",
+				ID:                  2,
+				Unique:              false,
+				Version:             descpb.StrictIndexColumnIDGuaranteesVersion,
+				KeyColumnNames:      []string{"statement_fingerprint_id", "ts"},
+				KeyColumnDirections: []catenumpb.IndexColumn_Direction{catenumpb.IndexColumn_ASC, catenumpb.IndexColumn_DESC},
+				KeyColumnIDs:        []descpb.ColumnID{4, 5},
+				KeySuffixColumnIDs:  []descpb.ColumnID{3, 1},
+			},
+			descpb.IndexDescriptor{
+				Name:                "idx_ts",
+				ID:                  3,
+				Unique:              false,
+				Version:             descpb.StrictIndexColumnIDGuaranteesVersion,
+				KeyColumnNames:      []string{"ts"},
+				KeyColumnDirections: []catenumpb.IndexColumn_Direction{catenumpb.IndexColumn_DESC},
+				KeyColumnIDs:        []descpb.ColumnID{5},
+				KeySuffixColumnIDs:  []descpb.ColumnID{3, 1},
 			},
 		),
 	)

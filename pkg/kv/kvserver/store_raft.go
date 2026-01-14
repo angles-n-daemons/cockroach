@@ -19,6 +19,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/raft/raftpb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc/rpcbase"
+	"github.com/cockroachdb/cockroach/pkg/sql/perftrace"
 	"github.com/cockroachdb/cockroach/pkg/util/admission/admissionpb"
 	"github.com/cockroachdb/cockroach/pkg/util/grunning"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -440,6 +441,25 @@ func (s *Store) withReplicaForRequest(
 func (s *Store) processRaftRequestWithReplica(
 	ctx context.Context, r *Replica, req *kvserverpb.RaftMessageRequest,
 ) *kvpb.Error {
+	// Capture raft follower work span for observability if perftrace is enabled
+	// and we have traced entries with fingerprint/parent context from the leader.
+	if collector := s.cfg.WorkSpanCollector; collector != nil {
+		if perftrace.Enabled.Get(&s.cfg.Settings.SV) && len(req.TracedEntries) > 0 {
+			// Use the first traced entry for fingerprint and parent span ID.
+			te := req.TracedEntries[0]
+			if te.StatementFingerprintID != 0 || te.PerftraceParentSpanID != 0 {
+				raftSpanHandle := collector.StartSpan(
+					ctx,
+					"raft.follower",
+					te.StatementFingerprintID,
+					te.PerftraceParentSpanID, // kv.batch span ID from leader
+				)
+				raftSpanHandle.Start()
+				defer raftSpanHandle.Finish()
+			}
+		}
+	}
+
 	// Record the CPU time processing the request for this replica. This is
 	// recorded regardless of errors that are encountered.
 	defer r.MeasureRaftCPUNanos(grunning.Time())

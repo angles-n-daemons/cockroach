@@ -254,6 +254,7 @@ go_library(
         "//pkg/sql/optionalnodeliveness",
         "//pkg/sql/parser",
         "//pkg/sql/parser/statements",
+        "//pkg/sql/perftrace",
         "//pkg/sql/pgwire",
         "//pkg/sql/pgwire/pgcode",
         "//pkg/sql/pgwire/pgerror",

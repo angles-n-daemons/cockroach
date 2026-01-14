@@ -37,6 +37,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/execversion"
 	"github.com/cockroachdb/cockroach/pkg/sql/flowinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/exec"
+	"github.com/cockroachdb/cockroach/pkg/sql/perftrace"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/physicalplan"
@@ -461,11 +462,22 @@ func (dsp *DistSQLPlanner) setupFlows(
 		statementSQL = statementSQL[:setupFlowRequestStmtMaxLength]
 	}
 	setupReq := execinfrapb.SetupFlowRequest{
-		LeafTxnInputState: leafInputState,
-		Version:           execversion.V25_4,
-		TraceKV:           recv.tracing.KVTracingEnabled(),
-		CollectStats:      planCtx.collectExecStats,
-		StatementSQL:      statementSQL,
+		LeafTxnInputState:      leafInputState,
+		Version:                execversion.V25_4,
+		TraceKV:                recv.tracing.KVTracingEnabled(),
+		CollectStats:           planCtx.collectExecStats,
+		StatementSQL:           statementSQL,
+		StatementFingerprintID: planCtx.statementFingerprintID,
+	}
+	// Add query tags from context for work span propagation.
+	if tags := perftrace.GetQueryTagsFromContext(ctx); len(tags) > 0 {
+		setupReq.QueryTags = make([]execinfrapb.QueryTag, len(tags))
+		for i, tag := range tags {
+			setupReq.QueryTags[i] = execinfrapb.QueryTag{
+				Key:   tag.Key,
+				Value: tag.Value,
+			}
+		}
 	}
 	if localState.IsLocal {
 		// VectorizeMode is the only field that the setup code expects to be set

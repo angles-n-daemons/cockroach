@@ -17,6 +17,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
+	"github.com/cockroachdb/cockroach/pkg/sql/perftrace"
 	"github.com/cockroachdb/cockroach/pkg/util/buildutil"
 	"github.com/cockroachdb/cockroach/pkg/util/intsets"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -414,6 +415,10 @@ type ProcessorBaseNoHelper struct {
 	// curInputToDrain is the index into inputsToDrain that needs to be drained
 	// next.
 	curInputToDrain int
+
+	// workSpanHandle is used for work span capture observability.
+	// If non-nil, it should be finished when the processor is closed.
+	workSpanHandle *perftrace.SpanHandle
 }
 
 // MustBeStreaming implements the Processor interface.
@@ -869,6 +874,21 @@ func (pb *ProcessorBase) AppendTrailingMeta(meta execinfrapb.ProducerMetadata) {
 	pb.trailingMeta = append(pb.trailingMeta, meta)
 }
 
+// InternalClose wraps ProcessorBaseNoHelper.InternalClose and captures
+// memory_used from the MemMonitor before finishing the work span.
+func (pb *ProcessorBase) InternalClose() bool {
+	if pb.Closed {
+		return false
+	}
+
+	// Capture memory_used before finishing the work span.
+	if pb.workSpanHandle != nil && pb.MemMonitor != nil {
+		pb.workSpanHandle.IncrementComponentMetric("memory_used", pb.MemMonitor.AllocBytes())
+	}
+
+	return pb.ProcessorBaseNoHelper.InternalClose()
+}
+
 // ProcessorSpan creates a child span for a processor (if we are doing any
 // tracing). The returned span needs to be finished using tracing.FinishSpan.
 func ProcessorSpan(
@@ -930,6 +950,21 @@ func (pb *ProcessorBaseNoHelper) StartInternal(
 	if !noSpan {
 		pb.ctx, pb.span = ProcessorSpan(ctx, pb.FlowCtx, name, pb.ProcessorID, eventListeners...)
 	}
+
+	// Capture processor work span for observability.
+	if pb.FlowCtx != nil && pb.FlowCtx.Cfg != nil && pb.FlowCtx.Cfg.WorkSpanCollector != nil {
+		if perftrace.Enabled.Get(&pb.FlowCtx.Cfg.Settings.SV) {
+			parentID := perftrace.GetParentSpanIDFromContext(ctx)
+			pb.workSpanHandle = pb.FlowCtx.Cfg.WorkSpanCollector.StartSpan(
+				ctx,
+				"sql."+name,
+				pb.FlowCtx.StatementFingerprintID,
+				parentID,
+			)
+			pb.workSpanHandle.Start()
+		}
+	}
+
 	return pb.ctx
 }
 
@@ -964,6 +999,13 @@ func (pb *ProcessorBaseNoHelper) InternalClose() bool {
 	}
 
 	pb.Closed = true
+
+	// Finish the work span before the tracing span.
+	if pb.workSpanHandle != nil {
+		pb.workSpanHandle.Finish()
+		pb.workSpanHandle = nil
+	}
+
 	pb.span.Finish()
 	pb.span = nil
 	// Reset the context so that any incidental uses after this point do not

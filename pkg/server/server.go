@@ -105,6 +105,7 @@ import (
 	_ "github.com/cockroachdb/cockroach/pkg/sql/inspect"  // register job and planHook declared outside of pkg/sql
 	_ "github.com/cockroachdb/cockroach/pkg/sql/isession" // register isession constructor hook
 	"github.com/cockroachdb/cockroach/pkg/sql/optionalnodeliveness"
+	"github.com/cockroachdb/cockroach/pkg/sql/perftrace"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire"
 	_ "github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scjob" // register jobs declared outside of pkg/sql
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/catconstants"
@@ -980,6 +981,15 @@ func NewServer(cfg Config, stopper *stop.Stopper) (serverctl.ServerStartupInterf
 		SchedulerLatencyListener:     admissionControl.schedulerLatencyListener,
 		RangeCount:                   &atomic.Int64{},
 	}
+	// Create the work span collector for perftrace observability. This is shared
+	// between the SQL layer (distSQL) and the KV layer (stores). We pass the
+	// nodeIDContainer so the node ID is read dynamically after it's assigned.
+	workSpanCollector := perftrace.NewCollector(
+		nodeIDContainer,
+		clock,
+		st,
+	)
+	storeCfg.WorkSpanCollector = workSpanCollector
 	if storeTestingKnobs := cfg.TestingKnobs.Store; storeTestingKnobs != nil {
 		storeCfg.TestingKnobs = *storeTestingKnobs.(*kvserver.StoreTestingKnobs)
 	}
@@ -1260,6 +1270,7 @@ func NewServer(cfg Config, stopper *stop.Stopper) (serverctl.ServerStartupInterf
 		admissionPacerFactory:    gcoords.ElasticCPU,
 		rangeDescIteratorFactory: rangedesc.NewIteratorFactory(db),
 		tenantCapabilitiesReader: sql.MakeSystemTenantOnly[tenantcapabilities.Reader](tenantCapabilitiesWatcher),
+		workSpanCollector:        workSpanCollector,
 	})
 	if err != nil {
 		return nil, err

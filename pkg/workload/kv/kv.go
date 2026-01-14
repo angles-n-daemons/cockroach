@@ -98,6 +98,8 @@ type kv struct {
 	prepareReadOnly                      bool
 	writesUseSelect1                     bool
 	alwaysIncKeySeq                      bool
+	tableName                            string
+	service                              string
 }
 
 func init() {
@@ -204,6 +206,10 @@ var kvMeta = workload.Meta{
 			`Number of writes in the long-running transaction when using --long-running-txn.`)
 		g.flags.BoolVar(&g.alwaysIncKeySeq, `always-inc-key-seq`, false,
 			`Increment the random key seq num for all operations, not just writes.`)
+		g.flags.StringVar(&g.tableName, `table-name`, `kv`,
+			`Name of the table to use for the workload.`)
+		g.flags.StringVar(&g.service, `service`, ``,
+			`Service name to include as a SQL commenter tag at the end of queries (e.g., --service=payments appends /*service='payments'*/).`)
 		g.connFlags = workload.NewConnFlags(&g.flags)
 		return g
 	},
@@ -223,15 +229,15 @@ func (w *kv) Hooks() workload.Hooks {
 	return workload.Hooks{
 		PostLoad: func(_ context.Context, db *gosql.DB) error {
 			if w.enum {
-				_, err := db.Exec(`
+				_, err := db.Exec(fmt.Sprintf(`
 CREATE TYPE enum_type AS ENUM ('v');
-ALTER TABLE kv ADD COLUMN e enum_type NOT NULL AS ('v') STORED;`)
+ALTER TABLE %s ADD COLUMN e enum_type NOT NULL AS ('v') STORED;`, w.tableName))
 				if err != nil {
 					return err
 				}
 			}
 			if w.scatter {
-				if _, err := db.Exec(`ALTER TABLE kv SCATTER`); err != nil {
+				if _, err := db.Exec(fmt.Sprintf(`ALTER TABLE %s SCATTER`, w.tableName)); err != nil {
 					return err
 				}
 			}
@@ -408,7 +414,7 @@ func (w *kv) Tables() []workload.Table {
 	// like Splits or InitialRows.
 	kg := w.createKeyGenerator()
 
-	table := workload.Table{Name: `kv`}
+	table := workload.Table{Name: w.tableName}
 	table.Splits = workload.Tuples(
 		w.splits,
 		func(splitIdx int) []interface{} {
@@ -496,15 +502,21 @@ func (w *kv) Ops(
 		return workload.QueryLoad{}, err
 	}
 
+	// sqlCommentSuffix is the SQL commenter tag appended to queries if service is set.
+	sqlCommentSuffix := ""
+	if w.service != "" {
+		sqlCommentSuffix = fmt.Sprintf(" /*service='%s'*/", w.service)
+	}
+
 	// Read statement
 	var buf strings.Builder
 	var folBuf strings.Builder
 	if w.enum {
-		buf.WriteString(`SELECT k, v, e FROM kv WHERE k IN (`)
-		folBuf.WriteString(`SELECT k, v, e FROM kv AS OF SYSTEM TIME follower_read_timestamp() WHERE k IN (`)
+		fmt.Fprintf(&buf, `SELECT k, v, e FROM %s WHERE k IN (`, w.tableName)
+		fmt.Fprintf(&folBuf, `SELECT k, v, e FROM %s AS OF SYSTEM TIME follower_read_timestamp() WHERE k IN (`, w.tableName)
 	} else {
-		buf.WriteString(`SELECT k, v FROM kv WHERE k IN (`)
-		folBuf.WriteString(`SELECT k, v FROM kv AS OF SYSTEM TIME follower_read_timestamp() WHERE k IN (`)
+		fmt.Fprintf(&buf, `SELECT k, v FROM %s WHERE k IN (`, w.tableName)
+		fmt.Fprintf(&folBuf, `SELECT k, v FROM %s AS OF SYSTEM TIME follower_read_timestamp() WHERE k IN (`, w.tableName)
 	}
 	for i := 0; i < w.batchSize; i++ {
 		if i > 0 {
@@ -515,14 +527,16 @@ func (w *kv) Ops(
 		fmt.Fprintf(&folBuf, `$%d`, i+1)
 	}
 	buf.WriteString(`)`)
+	buf.WriteString(sqlCommentSuffix)
 	folBuf.WriteString(`)`)
+	folBuf.WriteString(sqlCommentSuffix)
 
 	readStmtStr := buf.String()
 	followerReadStmtStr := folBuf.String()
 
 	// Write statement
 	buf.Reset()
-	buf.WriteString(`UPSERT INTO kv (k, v) VALUES`)
+	fmt.Fprintf(&buf, `UPSERT INTO %s (k, v) VALUES`, w.tableName)
 	for i := 0; i < w.batchSize; i++ {
 		j := i * 2
 		if i > 0 {
@@ -530,13 +544,14 @@ func (w *kv) Ops(
 		}
 		fmt.Fprintf(&buf, ` ($%d, $%d)`, j+1, j+2)
 	}
+	buf.WriteString(sqlCommentSuffix)
 	writeStmtStr := buf.String()
 
 	// Select for update statement
 	var sfuStmtStr string
 	if w.writesUseSelectForUpdate {
 		buf.Reset()
-		buf.WriteString(`SELECT k, v FROM kv WHERE k IN (`)
+		fmt.Fprintf(&buf, `SELECT k, v FROM %s WHERE k IN (`, w.tableName)
 		for i := 0; i < w.batchSize; i++ {
 			if i > 0 {
 				buf.WriteString(", ")
@@ -544,12 +559,13 @@ func (w *kv) Ops(
 			fmt.Fprintf(&buf, `$%d`, i+1)
 		}
 		buf.WriteString(`) FOR UPDATE`)
+		buf.WriteString(sqlCommentSuffix)
 		sfuStmtStr = buf.String()
 	}
 
 	// Span statement
 	buf.Reset()
-	buf.WriteString(`SELECT count(v) FROM [SELECT v FROM kv`)
+	fmt.Fprintf(&buf, `SELECT count(v) FROM [SELECT v FROM %s`, w.tableName)
 	if w.spanLimit > 0 {
 		// Span statements without a limit query all ranges. However, if there's
 		// a span limit specified, we want to randomly choose the range from which
@@ -558,11 +574,12 @@ func (w *kv) Ops(
 		fmt.Fprintf(&buf, ` WHERE k >= $1 ORDER BY k LIMIT %d`, w.spanLimit)
 	}
 	buf.WriteString(`]`)
+	buf.WriteString(sqlCommentSuffix)
 	spanStmtStr := buf.String()
 
 	// Del statement
 	buf.Reset()
-	buf.WriteString(`DELETE FROM kv WHERE k IN (`)
+	fmt.Fprintf(&buf, `DELETE FROM %s WHERE k IN (`, w.tableName)
 	for i := 0; i < w.batchSize; i++ {
 		if i > 0 {
 			buf.WriteString(", ")
@@ -570,6 +587,7 @@ func (w *kv) Ops(
 		fmt.Fprintf(&buf, `$%d`, i+1)
 	}
 	buf.WriteString(`)`)
+	buf.WriteString(sqlCommentSuffix)
 	delStmtStr := buf.String()
 
 	kg := w.createKeyGenerator()

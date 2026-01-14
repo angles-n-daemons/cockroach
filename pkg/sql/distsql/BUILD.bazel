@@ -21,6 +21,7 @@ go_library(
         "//pkg/sql/execversion",
         "//pkg/sql/faketreeeval",
         "//pkg/sql/flowinfra",
+        "//pkg/sql/perftrace",
         "//pkg/sql/rowflow",
         "//pkg/sql/sem/eval",
         "//pkg/sql/sem/tree",

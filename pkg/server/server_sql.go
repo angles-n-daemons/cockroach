@@ -107,6 +107,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlliveness/slprovider"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlstats"
 	"github.com/cockroachdb/cockroach/pkg/sql/stats"
+	"github.com/cockroachdb/cockroach/pkg/sql/perftrace"
 	"github.com/cockroachdb/cockroach/pkg/sql/stmtdiagnostics"
 	"github.com/cockroachdb/cockroach/pkg/sql/syntheticprivilegecache"
 	tablemetadatacacheutil "github.com/cockroachdb/cockroach/pkg/sql/tablemetadatacache/util"
@@ -186,6 +187,8 @@ type SQLServer struct {
 	settingsWatcher                *settingswatcher.SettingsWatcher
 
 	systemConfigWatcher *systemconfigwatcher.Cache
+
+	workSpanFlusher *perftrace.Flusher
 
 	isMeta1Leaseholder func(context.Context, hlc.ClockTimestamp) (bool, error)
 
@@ -421,6 +424,11 @@ type sqlServerArgs struct {
 	tenantTimeSeriesServer *ts.TenantServer
 
 	tenantCapabilitiesReader sql.SystemTenantOnly[tenantcapabilities.Reader]
+
+	// workSpanCollector is the shared work span collector for perftrace
+	// observability. It's shared between the SQL layer (distSQL) and the
+	// KV layer (stores).
+	workSpanCollector *perftrace.Collector
 }
 
 type monitorAndMetrics struct {
@@ -1252,6 +1260,16 @@ func newSQLServer(ctx context.Context, cfg sqlServerArgs) (*SQLServer, error) {
 
 	distSQLServer.ServerConfig.ProtectedTimestampProvider = execCfg.ProtectedTimestampProvider
 
+	// Set up work span capture for observability. The collector is shared with
+	// the KV layer (stores) and created in server.go.
+	distSQLServer.ServerConfig.WorkSpanCollector = cfg.workSpanCollector
+	workSpanFlusher := perftrace.NewFlusher(
+		cfg.workSpanCollector,
+		internalDB,
+		cfg.Settings,
+		cfg.stopper,
+	)
+
 	for _, m := range pgServer.Metrics() {
 		cfg.registry.AddMetricStruct(m)
 	}
@@ -1454,6 +1472,7 @@ func newSQLServer(ctx context.Context, cfg sqlServerArgs) (*SQLServer, error) {
 		spanconfigSQLWatcher:           spanConfig.sqlWatcher,
 		settingsWatcher:                settingsWatcher,
 		systemConfigWatcher:            cfg.systemConfigWatcher,
+		workSpanFlusher:                workSpanFlusher,
 		isMeta1Leaseholder:             cfg.isMeta1Leaseholder,
 		cfg:                            cfg.BaseConfig,
 		internalDBMemMonitor:           internalDBMonitor,
@@ -1788,6 +1807,9 @@ func (s *SQLServer) preStart(
 		s.execCfg.CaptureIndexUsageStatsKnobs,
 	)
 	s.execCfg.SyntheticPrivilegeCache.Start(ctx)
+
+	// Start the work span flusher for observability.
+	s.workSpanFlusher.Start(ctx)
 
 	s.startLicenseEnforcer(ctx, knobs)
 

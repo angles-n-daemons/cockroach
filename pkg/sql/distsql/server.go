@@ -25,6 +25,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/execversion"
 	"github.com/cockroachdb/cockroach/pkg/sql/faketreeeval"
 	"github.com/cockroachdb/cockroach/pkg/sql/flowinfra"
+	"github.com/cockroachdb/cockroach/pkg/sql/perftrace"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowflow"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/eval"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
@@ -388,6 +389,19 @@ func (ds *ServerImpl) setupFlow(
 		ctx, req.Flow.FlowID, evalCtx, monitor, diskMonitor, makeLeaf, req.TraceKV,
 		req.CollectStats, localState, req.Flow.Gateway == ds.NodeID.SQLInstanceID(),
 	)
+	flowCtx.StatementFingerprintID = req.StatementFingerprintID
+
+	// Propagate query tags to context for work span capture.
+	if len(req.QueryTags) > 0 {
+		perfTags := make([]perftrace.QueryTag, len(req.QueryTags))
+		for i, tag := range req.QueryTags {
+			perfTags[i] = perftrace.QueryTag{
+				Key:   tag.Key,
+				Value: tag.Value,
+			}
+		}
+		ctx = perftrace.WithQueryTags(ctx, perfTags)
+	}
 
 	// req always contains the desired vectorize mode, regardless of whether we
 	// have non-nil localState.EvalContext. We don't want to update EvalContext

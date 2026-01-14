@@ -157,6 +157,7 @@ var informationSchema = virtualSchema{
 		catconstants.InformationSchemaViewTableUsageTableID:               informationSchemaViewTableUsageTable,
 		catconstants.InformationSchemaViewsTableID:                        informationSchemaViewsTable,
 		catconstants.InformationSchemaCrdbIndexUsageStatsiticsTableID:     informationSchemaCrdbIndexUsageStatsTable,
+		catconstants.InformationSchemaWorkSampleTableID:                    informationSchemaWorkSampleView,
 	},
 	tableValidator:             validateInformationSchemaTable,
 	validWithNoDatabaseContext: true,
@@ -2549,6 +2550,25 @@ var informationSchemaCrdbIndexUsageStatsTable = virtualSchemaTable{
 		`cluster-wide RPC fanout.`,
 	schema:    vtable.CRDBIndexUsageStatistics,
 	generator: indexUsageStatisticsGenerator,
+}
+
+var informationSchemaWorkSampleView = virtualSchemaView{
+	schema: vtable.WorkSample,
+	resultColumns: colinfo.ResultColumns{
+		{Name: "id", Typ: types.Int},
+		{Name: "parent_id", Typ: types.Int},
+		{Name: "node_id", Typ: types.Int4},
+		{Name: "statement_fingerprint_id", Typ: types.Int},
+		{Name: "statement_id", Typ: types.String},
+		{Name: "ts", Typ: types.TimestampTZ},
+		{Name: "duration", Typ: types.Int},
+		{Name: "cpu_time", Typ: types.Int},
+		{Name: "component", Typ: types.String},
+		{Name: "component_metrics", Typ: types.Jsonb},
+		{Name: "component_attributes", Typ: types.Jsonb},
+		{Name: "query_tags", Typ: types.Jsonb},
+		{Name: "query", Typ: types.String},
+	},
 }
 
 // forEachSchema iterates over the physical and virtual schemas.

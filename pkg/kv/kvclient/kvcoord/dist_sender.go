@@ -27,6 +27,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/rpc/rpcbase"
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
+	"github.com/cockroachdb/cockroach/pkg/sql/perftrace"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/admission/admissionpb"
 	"github.com/cockroachdb/cockroach/pkg/util/grpcutil"
@@ -1195,6 +1196,15 @@ func (ds *DistSender) initAndVerifyBatch(ctx context.Context, ba *kvpb.BatchRequ
 		ba.ProfileLabels = append(ba.ProfileLabels, key, value)
 		return true
 	})
+
+	// If the context has any perftrace query tags, attach them to the BatchRequest.
+	// These tags will be extracted on the server side for work span capture.
+	if tags := perftrace.GetQueryTagsFromContext(ctx); len(tags) > 0 {
+		ba.QueryTags = make([]kvpb.QueryTag, len(tags))
+		for i, tag := range tags {
+			ba.QueryTags[i] = kvpb.QueryTag{Key: tag.Key, Value: tag.Value}
+		}
+	}
 
 	return nil
 }

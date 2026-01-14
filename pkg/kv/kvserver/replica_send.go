@@ -26,6 +26,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
+	"github.com/cockroachdb/cockroach/pkg/sql/perftrace"
 	"github.com/cockroachdb/cockroach/pkg/util/circuit"
 	"github.com/cockroachdb/cockroach/pkg/util/grunning"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
@@ -130,6 +131,46 @@ func (r *Replica) SendWithWriteBytes(
 	// recorded regardless of errors that are encountered.
 	startCPU := grunning.Time()
 	defer r.MeasureReqCPUNanos(ctx, startCPU)
+
+	// Capture KV batch work span for observability.
+	// This is done at the kvserver layer (not dist_sender) so that CPU time
+	// is accurately captured for requests processed on remote nodes.
+	var kvSpanHandle *perftrace.SpanHandle
+	if collector := r.store.cfg.WorkSpanCollector; collector != nil {
+		// Extract query tags from the batch request and add to context.
+		// These are propagated from the SQL layer via the DistSender.
+		if len(ba.QueryTags) > 0 {
+			perfTags := make([]perftrace.QueryTag, len(ba.QueryTags))
+			for i, tag := range ba.QueryTags {
+				perfTags[i] = perftrace.QueryTag{Key: tag.Key, Value: tag.Value}
+			}
+			ctx = perftrace.WithQueryTags(ctx, perfTags)
+		}
+
+		fingerprintID := perftrace.GetFingerprintFromContext(ctx)
+		parentID := perftrace.GetParentSpanIDFromContext(ctx)
+		kvSpanHandle = collector.StartSpan(
+			ctx,
+			"kv.batch",
+			fingerprintID,
+			parentID,
+		)
+		kvSpanHandle.Start()
+		ctx = perftrace.WithCurrentSpanHandle(ctx, kvSpanHandle)
+		// Set this span as parent for raft proposals so raft.follower spans
+		// on other nodes can be linked as children.
+		ctx = perftrace.WithParentSpanID(ctx, kvSpanHandle.ID())
+
+		// Set start_key and range_id attributes.
+		if len(ba.Requests) > 0 {
+			startKey := ba.Requests[0].GetInner().Header().Key.String()
+			if len(startKey) > 100 {
+				startKey = startKey[:100]
+			}
+			kvSpanHandle.SetComponentAttribute("start_key", startKey)
+		}
+		kvSpanHandle.SetComponentAttribute("range_id", r.RangeID.String())
+	}
 
 	if r.store.cfg.Settings.CPUProfileType() == cluster.CPUProfileWithLabels {
 		var reset func()
@@ -239,6 +280,14 @@ func (r *Replica) SendWithWriteBytes(
 		r.recordRequestWriteBytes(writeBytes.WriteBytes + writeBytes.IngestedBytes)
 	}
 	r.recordImpactOnRateLimiter(ctx, br, isReadOnly)
+
+	// Finish the work span with write_io metric.
+	if kvSpanHandle != nil {
+		if writeBytes != nil {
+			kvSpanHandle.IncrementComponentMetric("write_io", writeBytes.WriteBytes+writeBytes.IngestedBytes)
+		}
+		kvSpanHandle.Finish()
+	}
 	return br, writeBytes, pErr
 }
 

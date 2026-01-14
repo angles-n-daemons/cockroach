@@ -3022,9 +3022,23 @@ message Header {
   // evaluated in descending range order.
   bool is_reverse = 38;
 
+  // QueryTags are sqlcommenter tags propagated for work span capture observability.
+  // These are passed from the SQL layer through to KV to enable correlation of
+  // KV work spans with application-level context.
+  repeated QueryTag query_tags = 39 [(gogoproto.nullable) = false,
+    (gogoproto.customname) = "QueryTags"];
+
   reserved 7, 10, 12, 14, 20, 24;
 
-  // Next ID: 39
+  // Next ID: 40
+}
+
+// QueryTag represents a sqlcommenter key-value tag for work span capture observability.
+// These tags are propagated from the SQL layer to enable correlation of KV operations
+// with application-level context (e.g., app=myapp, route=/api/users).
+message QueryTag {
+  string key = 1;
+  string value = 2;
 }
 
 message WriteOptions {

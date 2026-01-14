@@ -16,6 +16,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/raft/raftpb"
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
+	"github.com/cockroachdb/cockroach/pkg/sql/perftrace"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
@@ -28,15 +29,11 @@ import (
 // at any time on this store. Additional traces will be ignored until the number
 // of traces drops below the limit. Having too many active traces can negatively
 // impact performance as we iterate over all of them for some messages.
-//
-// TODO(baptist): Bump the default to a reasonable value like 10 that balances
-// usefulness with performance impact once we have validated the performance
-// impact.
 var MaxConcurrentRaftTraces = settings.RegisterIntSetting(
 	settings.SystemOnly,
 	"kv.raft.max_concurrent_traces",
 	"the maximum number of tracked raft traces, 0 will disable tracing",
-	0,
+	100,
 	settings.IntInRange(0, 1000),
 )
 
@@ -297,6 +294,10 @@ func (r *RaftTracer) RegisterRemote(te kvserverpb.TracedEntry) {
 // registration is successful. A duplicate registration of the same index is
 // considered a success and returns true, however the older registration is kept
 // and this registration is ignored.
+//
+// Registration occurs when either:
+// 1. The context has a verbose tracing span (existing behavior), or
+// 2. The context has perftrace context (fingerprint or parent span ID)
 func (r *RaftTracer) MaybeRegister(ctx context.Context, ent raftpb.Entry) bool {
 	// If the index is nil, then we can't trace this entry. This can happen if
 	// there is a leader/leaseholder spilt. We don't have an easy way to handle
@@ -306,9 +307,17 @@ func (r *RaftTracer) MaybeRegister(ctx context.Context, ent raftpb.Entry) bool {
 		return false
 	}
 
-	// Only register the entry if this is a traced context with verbose logging.
+	// Check for verbose tracing span (existing behavior).
 	span := tracing.SpanFromContext(ctx)
-	if span == nil || span.RecordingType() != tracingpb.RecordingVerbose {
+	hasVerboseTrace := span != nil && span.RecordingType() == tracingpb.RecordingVerbose
+
+	// Check for perftrace context (fingerprint or parent span ID).
+	fingerprintID := perftrace.GetFingerprintFromContext(ctx)
+	parentSpanID := perftrace.GetParentSpanIDFromContext(ctx)
+	hasPerftraceContext := fingerprintID != 0 || parentSpanID != 0
+
+	// Skip if neither tracing nor perftrace is active.
+	if !hasVerboseTrace && !hasPerftraceContext {
 		return false
 	}
 
@@ -319,13 +328,23 @@ func (r *RaftTracer) MaybeRegister(ctx context.Context, ent raftpb.Entry) bool {
 		return false
 	}
 
-	ctx, span = r.tracer.StartSpanCtx(ctx, "raft trace",
-		tracing.WithParent(span), tracing.WithFollowsFrom())
-	if tv, created := r.tryStore(r.newTraceValue(kvserverpb.TracedEntry{
-		Index:   kvpb.RaftIndex(ent.Index),
-		TraceID: span.TraceID(),
-		SpanID:  span.SpanID(),
-	}, ctx, span)); created {
+	te := kvserverpb.TracedEntry{
+		Index:                   kvpb.RaftIndex(ent.Index),
+		StatementFingerprintID:  fingerprintID,
+		PerftraceParentSpanID:   parentSpanID,
+	}
+
+	var propCtx context.Context
+	var propSpan *tracing.Span
+	if hasVerboseTrace {
+		// Only set trace/span IDs and create child span if verbose tracing.
+		propCtx, propSpan = r.tracer.StartSpanCtx(ctx, "raft trace",
+			tracing.WithParent(span), tracing.WithFollowsFrom())
+		te.TraceID = propSpan.TraceID()
+		te.SpanID = propSpan.SpanID()
+	}
+
+	if tv, created := r.tryStore(r.newTraceValue(te, propCtx, propSpan)); created {
 		tv.logf(1, "registering local trace %s", tv)
 	}
 	return true
