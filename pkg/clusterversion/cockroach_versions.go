@@ -246,6 +246,10 @@ const (
 	// table statistics collections.
 	V26_1_AddTableStatisticsLocksTable
 
+	// V26_1_AddWorkSpanTable adds the system.work_span table for query
+	// observability through work span capture.
+	V26_1_AddWorkSpanTable
+
 	// *************************************************
 	// Step (1) Add new versions above this comment.
 	// Do not add new versions to a patch release.
@@ -317,6 +321,8 @@ var versionTable = [numKeys]roachpb.Version{
 	V26_1_InstallMeta2StaticSplitPoint: {Major: 25, Minor: 4, Internal: 4},
 
 	V26_1_AddTableStatisticsLocksTable: {Major: 25, Minor: 4, Internal: 6},
+
+	V26_1_AddWorkSpanTable: {Major: 25, Minor: 4, Internal: 8},
 
 	// *************************************************
 	// Step (2): Add new versions above this comment.
