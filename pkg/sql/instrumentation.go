@@ -53,7 +53,7 @@ var collectTxnStatsSampleRate = settings.RegisterFloatSetting(
 	settings.ApplicationLevel,
 	"sql.txn_stats.sample_rate",
 	"the probability that a given transaction will collect execution statistics (displayed in the DB Console)",
-	0.01,
+	1.0,
 	settings.Fraction,
 )
 
@@ -674,6 +674,12 @@ func (ih *instrumentationHelper) Finish(
 	// Note that in case of implicit transactions, the trace contains the auto-commit too.
 	traceID := ih.sp.TraceID()
 	trace := ih.sp.GetConfiguredRecording()
+
+	// Record trace statistics if the collector is available.
+	if collector := cfg.TraceStatsCollector; collector != nil && len(trace) > 0 {
+		stats := tracing.ComputeRecordingStats(trace)
+		collector.RecordTrace(stats)
+	}
 
 	if ih.withStatementTrace != nil {
 		ih.withStatementTrace(trace, stmtRawSQL)

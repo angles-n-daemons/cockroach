@@ -132,6 +132,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/startup"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
+	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing/collector"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing/service"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing/tracingservicepb"
@@ -1007,6 +1008,7 @@ func newSQLServer(ctx context.Context, cfg sqlServerArgs) (*SQLServer, error) {
 		GetTableMetricsFunc:         storageEngineClient.GetTableMetrics,
 		ScanStorageInternalKeysFunc: storageEngineClient.ScanStorageInternalKeys,
 		TraceCollector:              traceCollector,
+		TraceStatsCollector:         tracing.NewTraceStatsCollector(),
 		TenantUsageServer:           cfg.tenantUsageServer,
 		KVStoresIterator:            cfg.kvStoresIterator,
 		InspectzServer:              cfg.inspectzServer,

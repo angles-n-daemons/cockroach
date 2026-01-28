@@ -13,6 +13,8 @@ go_library(
         "span_options.go",
         "tags.go",
         "test_utils.go",
+        "trace_stats.go",
+        "trace_stats_collector.go",
         "tracer.go",
         "tracer_snapshots.go",
         "tracing_aggregator.go",

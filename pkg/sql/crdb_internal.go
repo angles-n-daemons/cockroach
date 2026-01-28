@@ -234,6 +234,7 @@ var crdbInternal = virtualSchema{
 		catconstants.CrdbInternalStoreLivenessSupportFrom:           crdbInternalStoreLivenessSupportFromTable,
 		catconstants.CrdbInternalStoreLivenessSupportFor:            crdbInternalStoreLivenessSupportForTable,
 		catconstants.CrdbInternalClusterInspectErrorsViewID:         crdbInternalClusterInspectErrorsView,
+		catconstants.CrdbInternalNodeTraceStatisticsTableID:        crdbInternalNodeTraceStatisticsTable,
 	},
 	validWithNoDatabaseContext: true,
 }
@@ -9796,4 +9797,90 @@ CREATE VIEW crdb_internal.cluster_inspect_errors AS
 		{Name: "crdb_internal_expiration", Typ: types.TimestampTZ},
 	},
 	comment: `wrapper over system.inspect_errors`,
+}
+
+// crdbInternalNodeTraceStatisticsTable exposes aggregate trace statistics
+// for the current node.
+var crdbInternalNodeTraceStatisticsTable = virtualSchemaTable{
+	comment: `aggregate trace statistics for this node (RAM)`,
+	schema: `
+CREATE TABLE crdb_internal.node_trace_statistics (
+  trace_count                         INT NOT NULL,
+  total_spans                         INT NOT NULL,
+  avg_spans                           FLOAT NOT NULL,
+  total_structured_records            INT NOT NULL,
+  avg_structured_records              FLOAT NOT NULL,
+  total_structured_records_bytes      INT NOT NULL,
+  avg_structured_records_bytes        FLOAT NOT NULL,
+  total_component_stats_bytes         INT NOT NULL,
+  total_contention_event_bytes        INT NOT NULL,
+  total_admission_queue_stats_bytes   INT NOT NULL,
+  total_other_structured_bytes        INT NOT NULL,
+  total_log_records                   INT NOT NULL,
+  avg_log_records                     FLOAT NOT NULL,
+  total_log_records_bytes             INT NOT NULL,
+  avg_log_records_bytes               FLOAT NOT NULL,
+  total_tag_groups                    INT NOT NULL,
+  total_tags                          INT NOT NULL,
+  total_tags_bytes                    INT NOT NULL,
+  avg_tags_bytes                      FLOAT NOT NULL,
+  total_children_metadata_entries     INT NOT NULL,
+  total_children_metadata_bytes       INT NOT NULL,
+  avg_children_metadata_bytes         FLOAT NOT NULL,
+  total_span_overhead_bytes           INT NOT NULL,
+  avg_span_overhead_bytes             FLOAT NOT NULL,
+  total_estimated_bytes               INT NOT NULL,
+  avg_estimated_bytes                 FLOAT NOT NULL
+);`,
+	populate: func(ctx context.Context, p *planner, _ catalog.DatabaseDescriptor, addRow func(...tree.Datum) error) error {
+		// Require VIEWACTIVITY or VIEWACTIVITYREDACTED permissions.
+		hasRoleOption, _, err := p.HasViewActivityOrViewActivityRedactedRole(ctx)
+		if err != nil {
+			return err
+		}
+		if !hasRoleOption {
+			return noViewActivityOrViewActivityRedactedRoleError(p.User())
+		}
+
+		collector := p.ExecCfg().TraceStatsCollector
+		if collector == nil {
+			return nil
+		}
+
+		s := collector.GetStats()
+		if s.TraceCount == 0 {
+			// No traces collected yet.
+			return nil
+		}
+
+		tc := float64(s.TraceCount)
+		return addRow(
+			tree.NewDInt(tree.DInt(s.TraceCount)),
+			tree.NewDInt(tree.DInt(s.TotalSpans)),
+			tree.NewDFloat(tree.DFloat(float64(s.TotalSpans)/tc)),
+			tree.NewDInt(tree.DInt(s.TotalStructuredRecords)),
+			tree.NewDFloat(tree.DFloat(float64(s.TotalStructuredRecords)/tc)),
+			tree.NewDInt(tree.DInt(s.TotalStructuredRecordsBytes)),
+			tree.NewDFloat(tree.DFloat(float64(s.TotalStructuredRecordsBytes)/tc)),
+			tree.NewDInt(tree.DInt(s.TotalComponentStatsBytes)),
+			tree.NewDInt(tree.DInt(s.TotalContentionEventBytes)),
+			tree.NewDInt(tree.DInt(s.TotalAdmissionQueueStatsBytes)),
+			tree.NewDInt(tree.DInt(s.TotalOtherStructuredBytes)),
+			tree.NewDInt(tree.DInt(s.TotalLogRecords)),
+			tree.NewDFloat(tree.DFloat(float64(s.TotalLogRecords)/tc)),
+			tree.NewDInt(tree.DInt(s.TotalLogRecordsBytes)),
+			tree.NewDFloat(tree.DFloat(float64(s.TotalLogRecordsBytes)/tc)),
+			tree.NewDInt(tree.DInt(s.TotalTagGroups)),
+			tree.NewDInt(tree.DInt(s.TotalTags)),
+			tree.NewDInt(tree.DInt(s.TotalTagsBytes)),
+			tree.NewDFloat(tree.DFloat(float64(s.TotalTagsBytes)/tc)),
+			tree.NewDInt(tree.DInt(s.TotalChildrenMetadataEntries)),
+			tree.NewDInt(tree.DInt(s.TotalChildrenMetadataBytes)),
+			tree.NewDFloat(tree.DFloat(float64(s.TotalChildrenMetadataBytes)/tc)),
+			tree.NewDInt(tree.DInt(s.TotalSpanOverheadBytes)),
+			tree.NewDFloat(tree.DFloat(float64(s.TotalSpanOverheadBytes)/tc)),
+			tree.NewDInt(tree.DInt(s.TotalEstimatedBytes)),
+			tree.NewDFloat(tree.DFloat(float64(s.TotalEstimatedBytes)/tc)),
+		)
+	},
 }

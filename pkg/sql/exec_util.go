@@ -1847,6 +1847,10 @@ type ExecutorConfig struct {
 	// collect trace spans from their inflight node registries.
 	TraceCollector *collector.TraceCollector
 
+	// TraceStatsCollector aggregates trace statistics across executions for
+	// this node.
+	TraceStatsCollector *tracing.TraceStatsCollector
+
 	// TenantUsageServer is used to implement configuration APIs for tenant cost
 	// control.
 	TenantUsageServer multitenant.TenantUsageServer
