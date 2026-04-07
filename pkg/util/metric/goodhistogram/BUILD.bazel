@@ -1,0 +1,34 @@
+load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "goodhistogram",
+    srcs = [
+        "export.go",
+        "histogram.go",
+        "quantile.go",
+        "windowed_histogram.go",
+    ],
+    importpath = "github.com/cockroachdb/cockroach/pkg/util/metric/goodhistogram",
+    visibility = ["//visibility:public"],
+    deps = ["@com_github_prometheus_client_model//go"],
+)
+
+go_test(
+    name = "goodhistogram_test",
+    srcs = [
+        "benchmark_test.go",
+        "histogram_test.go",
+    ],
+    data = glob(["testdata/**"]),
+    embed = [":goodhistogram"],
+    deps = [
+        "//pkg/util/metric/base2histogram",
+        "@com_github_codahale_hdrhistogram//:hdrhistogram",
+        "@com_github_datadog_sketches_go//ddsketch",
+        "@com_github_prometheus_client_golang//prometheus",
+        "@com_github_prometheus_client_model//go",
+        "@com_github_raduberinde_tdigest//:tdigest",
+        "@com_github_stretchr_testify//require",
+        "@org_uber_go_atomic//:atomic",
+    ],
+)
