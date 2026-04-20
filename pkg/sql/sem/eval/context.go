@@ -276,6 +276,13 @@ type Context struct {
 	// RangeProber is used in calls to crdb_internal.probe_ranges.
 	RangeProber RangeProber
 
+	// TimeSeriesQuerier exposes the historical TSDB to the
+	// crdb_internal.tsdb generator builtin. It is implemented in pkg/ts
+	// and wired in at session start. May be nil in test configurations
+	// that do not bring up a TSDB server, in which case the builtin
+	// returns a feature-not-supported error.
+	TimeSeriesQuerier TimeSeriesQuerier
+
 	// StmtDiagnosticsRequestInserter is used by the
 	// crdb_internal.request_statement_bundle builtin to insert a statement
 	// bundle request.

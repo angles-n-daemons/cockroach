@@ -3943,6 +3943,7 @@ func (ex *connExecutor) initEvalCtx(ctx context.Context, evalCtx *extendedEvalCo
 			IndexUsageStatsController:        ex.server.indexUsageStatsController,
 			ConsistencyChecker:               p.execCfg.ConsistencyChecker,
 			RangeProber:                      p.execCfg.RangeProber,
+			TimeSeriesQuerier:                p.execCfg.TimeSeriesQuerier,
 			StmtDiagnosticsRequestInserter:   ex.server.cfg.StmtDiagnosticsRecorder.InsertRequest,
 			TxnDiagnosticsRequestInserter:    ex.server.cfg.TxnDiagnosticsRecorder.InsertTxnRequest,
 			CatalogBuiltins:                  &p.evalCatalogBuiltins,

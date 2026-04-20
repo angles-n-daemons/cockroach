@@ -1772,11 +1772,11 @@ type ExecutorConfig struct {
 	// system.cluster_metrics. Implemented by cmwriter.Writer.
 	ClusterMetricsWriter ClusterMetricAdder
 
-	// TimeSeriesQuerier exposes the historical TSDB to SQL features such
-	// as the crdb_internal.tsdb virtual table. Implemented by an adapter
-	// in pkg/ts and wired in at server startup. May be nil in test
+	// TimeSeriesQuerier exposes the historical TSDB to the
+	// crdb_internal.tsdb generator builtin. Implemented by an adapter in
+	// pkg/ts and wired in at server startup. May be nil in test
 	// configurations that do not bring up a TSDB server.
-	TimeSeriesQuerier TimeSeriesQuerier
+	TimeSeriesQuerier eval.TimeSeriesQuerier
 
 	TestingKnobs                         ExecutorTestingKnobs
 	UpgradeTestingKnobs                  *upgradebase.TestingKnobs

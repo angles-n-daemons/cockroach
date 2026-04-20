@@ -2906,6 +2906,7 @@ var builtinOidsArray = []string{
 	2951: `crdb_internal.zone_config_for_key(key: bytes) -> jsonb`,
 	2952: `crdb_internal.zone_config_span_end(key: bytes) -> bytes`,
 	2953: `tsround(input: timestamptz, bucket: interval) -> timestamptz`,
+	2954: `crdb_internal.tsdb(name: string) -> tuple{timestamptz AS timestamp, float AS value, string AS source}`,
 }
 
 var builtinOidsBySignature map[string]oid.Oid

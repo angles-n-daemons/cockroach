@@ -9,7 +9,7 @@ import (
 	"context"
 	"sort"
 
-	"github.com/cockroachdb/cockroach/pkg/sql"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/eval"
 	"github.com/cockroachdb/cockroach/pkg/ts/tspb"
 )
 
@@ -19,7 +19,7 @@ import (
 type queryFn func(ctx context.Context, req *tspb.TimeSeriesQueryRequest) (*tspb.TimeSeriesQueryResponse, error)
 
 // SQLAdapter bridges the SQL layer to the TSDB. It implements
-// sql.TimeSeriesQuerier on top of a Query function so that pkg/sql can
+// eval.TimeSeriesQuerier on top of a Query function so that pkg/sql can
 // query historical metrics without taking a direct dependency on pkg/ts.
 //
 // Each SQL-level query expands into two server queries:
@@ -37,12 +37,12 @@ type queryFn func(ctx context.Context, req *tspb.TimeSeriesQueryRequest) (*tspb.
 // data isolated. Sources are returned in sorted order, and within each
 // source the TSDB returns datapoints chronologically — together
 // satisfying the (source, timestamp) ordering contract documented on
-// sql.TimeSeriesQuerier.
+// eval.TimeSeriesQuerier.
 type SQLAdapter struct {
 	query queryFn
 }
 
-var _ sql.TimeSeriesQuerier = (*SQLAdapter)(nil)
+var _ eval.TimeSeriesQuerier = (*SQLAdapter)(nil)
 
 // NewSQLAdapter constructs an adapter that delegates to the supplied
 // system-tenant TSDB server.
@@ -57,10 +57,10 @@ func NewTenantSQLAdapter(server *TenantServer) *SQLAdapter {
 	return &SQLAdapter{query: server.Query}
 }
 
-// QueryTimeSeries implements sql.TimeSeriesQuerier.
+// QueryTimeSeries implements eval.TimeSeriesQuerier.
 func (a *SQLAdapter) QueryTimeSeries(
-	ctx context.Context, q sql.TimeSeriesQuery,
-) ([]sql.TimeSeriesRow, error) {
+	ctx context.Context, q eval.TimeSeriesQuery,
+) ([]eval.TimeSeriesRow, error) {
 	sources, err := a.discoverSources(ctx, q)
 	if err != nil {
 		return nil, err
@@ -91,11 +91,11 @@ func (a *SQLAdapter) QueryTimeSeries(
 	for i := range resp.Results {
 		total += len(resp.Results[i].Datapoints)
 	}
-	rows := make([]sql.TimeSeriesRow, 0, total)
+	rows := make([]eval.TimeSeriesRow, 0, total)
 	for i, result := range resp.Results {
 		src := sources[i]
 		for _, dp := range result.Datapoints {
-			rows = append(rows, sql.TimeSeriesRow{
+			rows = append(rows, eval.TimeSeriesRow{
 				TimestampNanos: dp.TimestampNanos,
 				Value:          dp.Value,
 				Source:         src,
@@ -108,7 +108,9 @@ func (a *SQLAdapter) QueryTimeSeries(
 // discoverSources runs an aggregated query across all sources to learn
 // which sources reported data in the requested window. The returned
 // slice is sorted to give the caller a stable iteration order.
-func (a *SQLAdapter) discoverSources(ctx context.Context, q sql.TimeSeriesQuery) ([]string, error) {
+func (a *SQLAdapter) discoverSources(
+	ctx context.Context, q eval.TimeSeriesQuery,
+) ([]string, error) {
 	resp, err := a.query(ctx, &tspb.TimeSeriesQueryRequest{
 		StartNanos: q.StartNanos,
 		EndNanos:   q.EndNanos,

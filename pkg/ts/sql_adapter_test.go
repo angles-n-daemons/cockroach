@@ -12,7 +12,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/cockroachdb/cockroach/pkg/sql"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/eval"
 	"github.com/cockroachdb/cockroach/pkg/ts/tspb"
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/errors"
@@ -23,7 +23,7 @@ import (
 // can assert the two-phase (discover sources, then per-source batch)
 // dispatch and the (source, timestamp) ordering of the returned rows
 // without standing up a full TSDB. These behaviours are part of the
-// sql.TimeSeriesQuerier contract that pkg/sql/crdb_internal.tsdb relies
+// eval.TimeSeriesQuerier contract that pkg/sql/crdb_internal.tsdb relies
 // on.
 func TestSQLAdapter(t *testing.T) {
 	defer leaktest.AfterTest(t)()
@@ -63,7 +63,7 @@ func TestSQLAdapter(t *testing.T) {
 		}
 
 		a := &SQLAdapter{query: stub}
-		rows, err := a.QueryTimeSeries(context.Background(), sql.TimeSeriesQuery{
+		rows, err := a.QueryTimeSeries(context.Background(), eval.TimeSeriesQuery{
 			MetricName: metric,
 			StartNanos: 0,
 			EndNanos:   1000,
@@ -87,7 +87,7 @@ func TestSQLAdapter(t *testing.T) {
 
 		// Six rows, ordered by (source, timestamp).
 		require.Len(t, rows, 6)
-		expected := []sql.TimeSeriesRow{
+		expected := []eval.TimeSeriesRow{
 			{Source: "1", TimestampNanos: 100, Value: 101},
 			{Source: "1", TimestampNanos: 200, Value: 201},
 			{Source: "2", TimestampNanos: 100, Value: 101},
@@ -106,7 +106,7 @@ func TestSQLAdapter(t *testing.T) {
 			return &tspb.TimeSeriesQueryResponse{}, nil
 		}
 		a := &SQLAdapter{query: stub}
-		rows, err := a.QueryTimeSeries(context.Background(), sql.TimeSeriesQuery{
+		rows, err := a.QueryTimeSeries(context.Background(), eval.TimeSeriesQuery{
 			MetricName: metric,
 		})
 		require.NoError(t, err)
@@ -125,7 +125,7 @@ func TestSQLAdapter(t *testing.T) {
 			return nil, discoveryErr
 		}
 		a := &SQLAdapter{query: stub}
-		rows, err := a.QueryTimeSeries(context.Background(), sql.TimeSeriesQuery{
+		rows, err := a.QueryTimeSeries(context.Background(), eval.TimeSeriesQuery{
 			MetricName: metric,
 		})
 		require.Nil(t, rows)
@@ -152,7 +152,7 @@ func TestSQLAdapter(t *testing.T) {
 			return nil, batchErr
 		}
 		a := &SQLAdapter{query: stub}
-		rows, err := a.QueryTimeSeries(context.Background(), sql.TimeSeriesQuery{
+		rows, err := a.QueryTimeSeries(context.Background(), eval.TimeSeriesQuery{
 			MetricName: metric,
 		})
 		require.Nil(t, rows)
@@ -184,7 +184,7 @@ func TestSQLAdapter(t *testing.T) {
 			return &tspb.TimeSeriesQueryResponse{Results: results}, nil
 		}
 		a := &SQLAdapter{query: stub}
-		rows, err := a.QueryTimeSeries(context.Background(), sql.TimeSeriesQuery{
+		rows, err := a.QueryTimeSeries(context.Background(), eval.TimeSeriesQuery{
 			MetricName: metric,
 		})
 		require.NoError(t, err)
@@ -235,7 +235,7 @@ func TestSQLAdapter(t *testing.T) {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				rows, err := a.QueryTimeSeries(context.Background(), sql.TimeSeriesQuery{
+				rows, err := a.QueryTimeSeries(context.Background(), eval.TimeSeriesQuery{
 					MetricName: metric,
 				})
 				if err != nil {

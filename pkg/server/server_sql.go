@@ -432,7 +432,7 @@ type sqlServerArgs struct {
 	// timeSeriesQuerier exposes the historical TSDB to SQL features
 	// (e.g. crdb_internal.tsdb). For the system tenant this wraps
 	// *ts.Server; for secondary tenants it wraps *ts.TenantServer.
-	timeSeriesQuerier sql.TimeSeriesQuerier
+	timeSeriesQuerier eval.TimeSeriesQuerier
 
 	tenantCapabilitiesReader sql.SystemTenantOnly[tenantcapabilities.Reader]
 }

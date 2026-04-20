@@ -237,6 +237,82 @@ func (g *aclexplodeGenerator) Values() (tree.Datums, error) {
 	return tree.Datums{row.grantor, row.grantee, row.privilegeType, row.isGrantable}, nil
 }
 
+// tsdbDefaultWindow is the time range covered by a crdb_internal.tsdb
+// call: the hour ending at the time the query starts. The function
+// signature does not let the caller widen the window — narrower
+// post-filtering via WHERE clauses is fine, but anything older than
+// this is invisible without an additional overload.
+const tsdbDefaultWindow = time.Hour
+
+var tsdbGeneratorType = types.MakeLabeledTuple(
+	[]*types.T{types.TimestampTZ, types.Float, types.String},
+	[]string{"timestamp", "value", "source"},
+)
+
+// tsdbGenerator emits per-source TSDB datapoints for a single metric
+// over the default window.
+type tsdbGenerator struct {
+	rows    []eval.TimeSeriesRow
+	nextIdx int
+}
+
+func newTsdbGenerator(
+	ctx context.Context, evalCtx *eval.Context, args tree.Datums,
+) (eval.ValueGenerator, error) {
+	if err := evalCtx.SessionAccessor.CheckPrivilege(
+		ctx, syntheticprivilege.GlobalPrivilegeObject, privilege.VIEWCLUSTERMETADATA,
+	); err != nil {
+		return nil, err
+	}
+	if evalCtx.TimeSeriesQuerier == nil {
+		return nil, pgerror.New(pgcode.FeatureNotSupported,
+			"crdb_internal.tsdb is not available on this server")
+	}
+	name, ok := tree.AsDString(args[0])
+	if !ok {
+		return nil, pgerror.Newf(pgcode.InvalidParameterValue,
+			"crdb_internal.tsdb name must be a string, got %T", args[0])
+	}
+	endNanos := timeutil.Now().UnixNano()
+	startNanos := endNanos - tsdbDefaultWindow.Nanoseconds()
+	rows, err := evalCtx.TimeSeriesQuerier.QueryTimeSeries(ctx, eval.TimeSeriesQuery{
+		MetricName: string(name),
+		StartNanos: startNanos,
+		EndNanos:   endNanos,
+	})
+	if err != nil {
+		return nil, errors.Wrapf(err, "querying tsdb metric %q", name)
+	}
+	return &tsdbGenerator{rows: rows}, nil
+}
+
+func (g *tsdbGenerator) ResolvedType() *types.T { return tsdbGeneratorType }
+
+func (g *tsdbGenerator) Start(_ context.Context, _ *kv.Txn) error { return nil }
+
+func (g *tsdbGenerator) Close(_ context.Context) {}
+
+func (g *tsdbGenerator) Next(_ context.Context) (bool, error) {
+	if g.nextIdx >= len(g.rows) {
+		return false, nil
+	}
+	g.nextIdx++
+	return true, nil
+}
+
+func (g *tsdbGenerator) Values() (tree.Datums, error) {
+	row := g.rows[g.nextIdx-1]
+	ts, err := tree.MakeDTimestampTZ(timeutil.Unix(0, row.TimestampNanos), time.Microsecond)
+	if err != nil {
+		return nil, err
+	}
+	return tree.Datums{
+		ts,
+		tree.NewDFloat(tree.DFloat(row.Value)),
+		tree.NewDString(row.Source),
+	}, nil
+}
+
 // generators is a map from name to slice of Builtins for all built-in
 // generators.
 //
@@ -342,6 +418,20 @@ var generators = map[string]builtinDefinition{
 			makeTSTZSeriesGenerator,
 			"Produces a virtual table containing the timestampTZ values from `start` to `end`, inclusive, by increment of `step`.",
 			volatility.Immutable,
+		),
+	),
+	// crdb_internal.tsdb returns the per-source datapoints recorded for a
+	// single TSDB metric over the last hour. Downsampling is left to the
+	// SQL caller via tsround() and GROUP BY.
+	"crdb_internal.tsdb": makeBuiltin(genProps(),
+		makeGeneratorOverload(
+			tree.ParamTypes{{Name: "name", Typ: types.String}},
+			tsdbGeneratorType,
+			newTsdbGenerator,
+			"Returns the raw (timestamp, source, value) datapoints for the given "+
+				"TSDB metric over the last hour. Downsample with `tsround(timestamp, "+
+				"'1m')` in GROUP BY. Requires VIEWCLUSTERMETADATA.",
+			volatility.Stable,
 		),
 	),
 	// crdb_internal.testing_callback is a generator function intended for internal unit tests.

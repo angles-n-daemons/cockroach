@@ -3,20 +3,21 @@
 // Use of this software is governed by the CockroachDB Software License
 // included in the /LICENSE file.
 
-package sql
+package eval
 
 import "context"
 
-// TimeSeriesQuerier exposes a narrow surface of the TSDB to the SQL layer.
-// It is implemented in pkg/ts and wired into ExecutorConfig at server
-// startup. Defining the interface here keeps pkg/sql free of an import on
-// pkg/ts (which would create a cycle, since pkg/ts already depends on
-// pkg/sql via SQL infrastructure for tests and admin RPCs).
+// TimeSeriesQuerier exposes a narrow surface of the TSDB to SQL builtins
+// (currently the crdb_internal.tsdb generator). It is implemented in
+// pkg/ts and wired into eval.Context at session start. Defining the
+// interface here keeps pkg/sql/sem/builtins free of an import on pkg/ts
+// (which would create a cycle).
 //
 // The interface is intentionally minimal: a single per-source point
 // query. Aggregation across sources and time-axis downsampling are left
-// to the SQL caller (e.g. the crdb_internal.tsdb virtual table uses
-// GROUP BY and the tsround() builtin to implement downsampling).
+// to the SQL caller (the crdb_internal.tsdb generator returns one row
+// per (source, timestamp) datapoint; downsampling happens via tsround
+// and GROUP BY).
 type TimeSeriesQuerier interface {
 	// QueryTimeSeries returns one TimeSeriesRow per (timestamp, source)
 	// pair for the requested metric over the requested time range. Rows
