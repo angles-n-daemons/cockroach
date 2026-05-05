@@ -28,6 +28,7 @@ go_library(
         "//pkg/col/coldata",
         "//pkg/kv/kvnemesis/kvnemesisutil",
         "//pkg/kv/kvserver/concurrency/lock",
+        "//pkg/obs/executionattributes",  # keep
         "//pkg/raft/raftpb",
         "//pkg/roachpb",
         "//pkg/storage/enginepb",
@@ -133,6 +134,7 @@ go_proto_library(
         "//pkg/kv/kvserver/concurrency/lock",
         "//pkg/kv/kvserver/readsummary/rspb",
         "//pkg/multitenant/tenantcapabilitiespb",
+        "//pkg/obs/executionattributes",  # keep
         "//pkg/roachpb",
         "//pkg/rpc/rpcpb",
         "//pkg/settings",

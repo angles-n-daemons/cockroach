@@ -3039,9 +3039,21 @@ message Header {
   // Used by the ASH sampler to choose the right encoding.
   uint32 workload_type = 41 [(gogoproto.customname) = "WorkloadType"];
 
+  // enrichment_id is the ASH sample enrichment identifier for
+  // statement-shaped work. When set, the receiver should resolve
+  // it via system.execution_attributes to retrieve the underlying
+  // (stmt_fingerprint_id, app_name) tuple. See
+  // pkg/obs/executionattributes.
+  //
+  // Mutually exclusive (by workload_type) with workload_id and
+  // app_name_id: statement-shaped work uses enrichment_id once the
+  // V26_3_AddExecutionAttributesTable cluster version is active;
+  // job- and system-shaped work continues to use workload_id.
+  uint64 enrichment_id = 42 [(gogoproto.customname) = "EnrichmentID", (gogoproto.casttype) = "github.com/cockroachdb/cockroach/pkg/obs/executionattributes.ID"];
+
   reserved 7, 10, 12, 14, 20, 24;
 
-  // Next ID: 42
+  // Next ID: 43
 }
 
 message WriteOptions {
