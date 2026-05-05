@@ -7,11 +7,15 @@ go_library(
         "cluster_settings.go",
         "doc.go",
         "id.go",
+        "metrics.go",
+        "writer.go",
     ],
     importpath = "github.com/cockroachdb/cockroach/pkg/obs/executionattributes",
     visibility = ["//visibility:public"],
     deps = [
         "//pkg/settings",
+        "//pkg/util/log",
+        "//pkg/util/metric",
         "@com_github_cespare_xxhash_v2//:xxhash",
     ],
 )
@@ -21,6 +25,7 @@ go_test(
     srcs = [
         "cache_test.go",
         "id_test.go",
+        "writer_test.go",
     ],
     embed = [":executionattributes"],
 )
