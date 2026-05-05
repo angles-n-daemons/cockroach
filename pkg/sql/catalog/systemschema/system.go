@@ -1398,6 +1398,29 @@ CREATE TABLE system.advisory_locks (
 	// * metadata: additional metadata about the statement as JSONB.
 	// * created_at: the timestamp when the record was created.
 	// * last_upserted: the timestamp when the record was last updated.
+	// ExecutionAttributesTableSchema defines the schema for the
+	// system.execution_attributes table. This table stores the mapping from
+	// an EnrichmentID (a uint64 hash of (stmt_fingerprint_id, app_name)) to
+	// its underlying attributes. Used by ASH sample enrichment to denormalize
+	// samples at sample-write time without threading individual attributes
+	// through every BatchRequest header. See pkg/obs/executionattributes.
+	//
+	// * id: uint64 hash of the canonical encoding of (stmt_fingerprint_id, app_name).
+	// * stmt_fingerprint_id: the statement fingerprint ID, stored verbatim
+	//   (not as a foreign key) so this row remains resolvable even after
+	//   system.statement_statistics rotates.
+	// * app_name: the application_name session variable value.
+	// * created_at: bookkeeping; supports a future TTL job if cardinality warrants it.
+	ExecutionAttributesTableSchema = `
+CREATE TABLE system.execution_attributes (
+    id                  INT8        NOT NULL,
+    stmt_fingerprint_id BYTES       NOT NULL,
+    app_name            STRING      NOT NULL,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT "primary" PRIMARY KEY (id ASC),
+    FAMILY "primary" (id, stmt_fingerprint_id, app_name, created_at)
+);`
+
 	StatementsTableSchema = `
 CREATE TABLE system.statements (
     id             INT8 NOT NULL DEFAULT unique_rowid(),
@@ -1457,7 +1480,7 @@ const SystemDatabaseName = catconstants.SystemDatabaseName
 // release version).
 //
 // NB: Don't set this to clusterversion.Latest; use a specific version instead.
-var SystemDatabaseSchemaBootstrapVersion = clusterversion.V26_3_AddAdvisoryLocksTable.Version()
+var SystemDatabaseSchemaBootstrapVersion = clusterversion.V26_3_AddExecutionAttributesTable.Version()
 
 // MakeSystemDatabaseDesc constructs a copy of the system database
 // descriptor.
@@ -1661,6 +1684,7 @@ func MakeSystemTables() []SystemTable {
 		TableStatisticsLocksTable,
 		AdvisoryLocksTable,
 		StatementsTable,
+		ExecutionAttributesTable,
 	}
 }
 
@@ -5567,6 +5591,37 @@ var (
 				KeyColumnDirections: singleASC,
 				KeyColumnIDs:        []descpb.ColumnID{3},
 				KeySuffixColumnIDs:  []descpb.ColumnID{1},
+			},
+		),
+	)
+
+	// ExecutionAttributesTable is the descriptor for system.execution_attributes.
+	ExecutionAttributesTable = makeSystemTable(
+		ExecutionAttributesTableSchema,
+		systemTable(
+			catconstants.ExecutionAttributesTableName,
+			descpb.InvalidID, // dynamically assigned
+			[]descpb.ColumnDescriptor{
+				{Name: "id", ID: 1, Type: types.Int},
+				{Name: "stmt_fingerprint_id", ID: 2, Type: types.Bytes},
+				{Name: "app_name", ID: 3, Type: types.String},
+				{Name: "created_at", ID: 4, Type: types.TimestampTZ, DefaultExpr: &nowTZString},
+			},
+			[]descpb.ColumnFamilyDescriptor{
+				{
+					Name:        "primary",
+					ID:          0,
+					ColumnNames: []string{"id", "stmt_fingerprint_id", "app_name", "created_at"},
+					ColumnIDs:   []descpb.ColumnID{1, 2, 3, 4},
+				},
+			},
+			descpb.IndexDescriptor{
+				Name:                "primary",
+				ID:                  1,
+				Unique:              true,
+				KeyColumnNames:      []string{"id"},
+				KeyColumnDirections: singleASC,
+				KeyColumnIDs:        []descpb.ColumnID{1},
 			},
 		),
 	)

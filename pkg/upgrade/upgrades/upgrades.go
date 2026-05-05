@@ -202,6 +202,14 @@ var upgrades = []upgradebase.Upgrade{
 		createAdvisoryLocksTable,
 		upgrade.RestoreActionNotRequired("cluster restore does not restore this table"),
 	),
+
+	upgrade.NewTenantUpgrade(
+		"create execution_attributes table",
+		clusterversion.V26_3_AddExecutionAttributesTable.Version(),
+		upgrade.NoPrecondition,
+		createExecutionAttributesTable,
+		upgrade.RestoreActionNotRequired("cluster restore does not restore this table"),
+	),
 	// Note: when starting a new release version, the first upgrade (for
 	// Vxy_zStart) must be a newFirstUpgrade. Keep this comment at the bottom.
 }
