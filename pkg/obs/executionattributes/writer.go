@@ -12,6 +12,10 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 )
 
+// discardLogEvery rate-limits the WARNING emitted on write-queue
+// overflow so a sustained stream of discards doesn't flood the log.
+var discardLogEvery = log.Every(time.Minute)
+
 // writeRequest is one pending durable write to system.execution_attributes.
 type writeRequest struct {
 	ID    ID
@@ -49,11 +53,19 @@ func NewWriter(exec executor, metrics *Metrics, queueSize int) *Writer {
 }
 
 // Enqueue adds a write request, dropping it if the queue is full.
+// Sustained drops surface as a rate-limited WARNING so operators have a
+// breadcrumb pointing at obs.execution_attributes.write_queue_size.
 func (w *Writer) Enqueue(req writeRequest) {
 	select {
 	case w.queue <- req:
 	default:
 		w.metrics.Discarded.Inc(1)
+		if discardLogEvery.ShouldLog() {
+			log.Dev.Warningf(context.Background(),
+				"execution_attributes write queue full; dropping entry id=%d. "+
+					"Consider raising obs.execution_attributes.write_queue_size.",
+				req.ID)
+		}
 	}
 }
 
